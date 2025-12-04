@@ -1,0 +1,133 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #000;
+    color: #fff;
+    overflow: hidden;
+}
+#container { width: 100vw; height: 100vh; margin: 20px; }
+
+/* UI Controls Styling */
+#controls {
+    position: absolute;
+    top: 20px; left: 20px;
+    background: rgba(0, 0, 0, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    z-index: 100;
+    backdrop-filter: blur(10px);
+    transition: width 0.3s, height 0.3s;
+    overflow: hidden;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.1);
+}
+#controls.collapsed { width: 50px; height: 50px; border-radius: 25px; }
+#controls:not(.collapsed) { width: 300px; height: auto; }
+
+.content { padding: 20px; opacity: 1; transition: opacity 0.3s 0.1s; }
+#controls.collapsed .content { opacity: 0; pointer-events: none; }
+
+.toggle-btn {
+    position: absolute; top: 0; left: 0;
+    width: 50px; height: 50px;
+    background: transparent; border: none;
+    color: #00d4ff; font-size: 24px;
+    cursor: pointer; z-index: 101;
+}
+.toggle-btn:hover { color: #fff; text-shadow: 0 0 10px #00d4ff; }
+
+h2 { font-size: 18px; margin-bottom: 15px; color: #00d4ff; letter-spacing: 1px; }
+
+button {
+    width: 100%; padding: 10px; margin: 5px 0;
+    background: linear-gradient(45deg, #00d4ff, #0055ff);
+    border: none; border-radius: 6px;
+    color: #fff; font-weight: bold; cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.2s;
+}
+button:hover { transform: translateY(-1px); box-shadow: 0 4px 15px rgba(0, 85, 255, 0.4); }
+button:active { transform: translateY(1px); }
+
+input[type="file"] { width: 100%; margin: 10px 0; font-size: 12px; color: #aaa; }
+
+.info { font-size: 11px; margin-top: 15px; color: #666; line-height: 1.4; border-top: 1px solid #333; padding-top: 10px; }
+.fps { position: absolute; bottom: 10px; left: 10px; color: #444; font-size: 10px; font-family: monospace; pointer-events: none; }
+
+#transcript {
+    position: absolute;
+    bottom: 40px;
+    left: 20px;
+    right: 20px;
+    width: auto;
+    max-width: calc(100vw - 40px);
+    height: 120px;
+
+    border-radius: 8px;
+
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 15px;
+    padding: 0 15px;
+    box-sizing: border-box;
+}
+#waveform {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    cursor: pointer;
+    user-select: none;
+    max-width: 100%;
+}
+#audioControls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+#playPauseBtn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    background: rgba(0, 212, 255, 0.2);
+    border: 1px solid #00d4ff;
+    border-radius: 50%;
+    color: #00d4ff;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+#playPauseBtn:hover {
+    background: rgba(0, 212, 255, 0.4);
+    transform: scale(1.1);
+}
+#playPauseBtn:active {
+    transform: scale(0.95);
+}
+#audioTimer {
+    color: #00d4ff;
+    font-family: monospace;
+    font-size: 14px;
+    font-weight: bold;
+    text-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+    white-space: nowrap;
+}
+
+.freq-visualizer {
+    position: fixed;
+    top: 0;
+    width: 60px;
+    height: 100vh;
+    z-index: 50;
+    pointer-events: none;
+}
+#freqLeft {
+    left: 30px;
+}
+#freqRight {
+    right: 30px;
+}
