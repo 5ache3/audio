@@ -14,7 +14,7 @@ let sound_mode = 'mic', waveCanvas, waveCtx, freqLeftCanvas, freqLeftCtx, freqRi
 let mediaElement, mediaSource;
 let showWaveLine = true;
 
-const PARTICLE_COUNT_PER_GROUP = 1000, TOTAL_GROUPS = 10, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
+const PARTICLE_COUNT_PER_GROUP = 700, TOTAL_GROUPS = 10, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
 const COLORS = [0xff0044, 0xff4400, 0xffcc00, 0x88ff00, 0x00ff88, 0x00d4ff, 0x0066ff, 0x4400ff, 0x8800ff, 0xff00cc];
 
 function init() {
