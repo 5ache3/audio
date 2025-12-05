@@ -1,447 +1,631 @@
-
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-let scene, camera, renderer, composer;
-let analyser, audioCtx, dataArray;
-let particles = [];
-let time = 0;
-let smoothedAudio = new Array(10).fill(0); // For smooth transitions
+let scene, camera, renderer, composer, analyser, audioCtx, dataArray, leftAnalyser, rightAnalyser, dataArrayLeft, dataArrayRight, splitterNode;
+let ambientLight;
+let particles = [], time = 0, smoothedAudio = new Array(10).fill(0);
+let currentShape = 'sphere';
+let audioSource, audioBuffer, waveformData, playbackStartTime, playbackOffset = 0;
+let isDragging = false, isPaused = false, pauseTime = 0, dragProgress = null;
+let micWaveformHistory = [], micStartTime, lastSeekTime = 0, dragHandlersAttached = false;
+let sound_mode = 'mic', waveCanvas, waveCtx, freqLeftCanvas, freqLeftCtx, freqRightCanvas, freqRightCtx;
+let mediaElement, mediaSource;
+let showWaveLine = true;
+let lastFileBuffer = null, lastFileWaveform = null, lastMediaUrl = null;
 
-// Waveform data
-let audioSource = null; // For uploaded files
-let audioBuffer = null; // Full audio buffer for uploaded files
-let waveformData = null; // Pre-computed waveform peaks
-let playbackStartTime = null; // When playback started
-let playbackOffset = 0; // Offset when seeking
-let isDragging = false; // Whether user is dragging the progress line
-let isPaused = false; // Whether audio is paused
-let pauseTime = 0; // Time when paused
-let micWaveformHistory = []; // Rolling buffer for microphone
-const MAX_MIC_HISTORY = 1000; // Max samples to keep for mic
-let lastSeekTime = 0; // Throttle seeking during drag
-let dragHandlersAttached = false; // Prevent duplicate event listeners
-let dragProgress = null; // Store progress during drag (null when not dragging)
-
-// Config
-const PARTICLE_COUNT_PER_SPHERE = 2000; // Slightly reduced for performance with Bloom
-const TOTAL_SPHERES = 10;
-const COLORS = [
-    0xff0044, // Deep Red
-    0xff4400, // Orange
-    0xffcc00, // Gold
-    0x88ff00, // Lime
-    0x00ff88, // Teal
-    0x00d4ff, // Cyan
-    0x0066ff, // Azure
-    0x4400ff, // Indigo
-    0x8800ff, // Violet
-    0xff00cc  // Magenta
-];
-
-let sound_mode='mic';
-let waveCanvas, waveCtx;
-let freqLeftCanvas, freqLeftCtx;
-let freqRightCanvas, freqRightCtx;
+const PARTICLE_COUNT_PER_GROUP = 1000, TOTAL_GROUPS = 10, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
+const COLORS = [0xff0044, 0xff4400, 0xffcc00, 0x88ff00, 0x00ff88, 0x00d4ff, 0x0066ff, 0x4400ff, 0x8800ff, 0xff00cc];
 
 function init() {
-    // Scene
     scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x000000, 0.02); // Depth cue
-
-    // Camera
+    scene.fog = new THREE.FogExp2(0x000000, 0.02);
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
     camera.position.z = 12;
-
-    // Renderer
-    renderer = new THREE.WebGLRenderer({ antialias: false }); // False for performance with bloom
+    renderer = new THREE.WebGLRenderer({ antialias: false });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ReinhardToneMapping;
     document.getElementById('container').appendChild(renderer.domElement);
 
-    // POST PROCESSING (The Glow Effect)
-    const renderScene = new RenderPass(scene, camera);
-    
-    // Resolution, Strength, Radius, Threshold
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-    bloomPass.strength = 2.0;
-    bloomPass.radius = 0.5;
-    bloomPass.threshold = 0.1;
-
+    bloomPass.strength = 2.0; bloomPass.radius = 0.5; bloomPass.threshold = 0.1;
     composer = new EffectComposer(renderer);
-    composer.addPass(renderScene);
+    composer.addPass(new RenderPass(scene, camera));
     composer.addPass(bloomPass);
+    window.bloomPass = bloomPass;
 
-    // Generate Spheres
-    createSpheres();
-
-    // Lights (Subtle, as particles are self-illuminated, but helps depth)
-    const ambient = new THREE.AmbientLight(0x444444);
-    scene.add(ambient);
+    createParticles(currentShape);
+    ambientLight = new THREE.AmbientLight(0x444444);
+    scene.add(ambientLight);
     
-    // Initialize waveform canvas
-    waveCanvas = document.getElementById("waveform");
-    if (waveCanvas) {
-        waveCtx = waveCanvas.getContext("2d");
-        resizeWaveCanvas();
-    }
-    
-    // Initialize frequency visualizer canvases
-    freqLeftCanvas = document.getElementById("freqLeft");
-    if (freqLeftCanvas) {
-        freqLeftCtx = freqLeftCanvas.getContext("2d");
-        resizeFreqCanvas(freqLeftCanvas);
-    }
-    
-    freqRightCanvas = document.getElementById("freqRight");
-    if (freqRightCanvas) {
-        freqRightCtx = freqRightCanvas.getContext("2d");
-        resizeFreqCanvas(freqRightCanvas);
-    }
-    
-    useMicrophone()
-    // Event Listeners
+    initCanvases();
+    useMicrophone();
     document.getElementById('uploadBtn').onclick = uploadAndPlay;
     document.getElementById('micBtn').onclick = useMicrophone;
-    const playPauseBtn = document.getElementById('playPauseBtn');
-    if (playPauseBtn) {
-        playPauseBtn.onclick = togglePlayPause;
+    const btn = document.getElementById('playPauseBtn');
+    if (btn) btn.onclick = togglePlayPause;
+    const shapeSel = document.getElementById('shapeSelect');
+    if (shapeSel) {
+        shapeSel.onchange = () => { const v = document.getElementById('shapeSelect').value; createParticles(v); };
+        buildCustomShapeSelect(shapeSel);
     }
+    const hideBtn = document.getElementById('hideDashboardBtn');
+    if (hideBtn) hideBtn.onclick = toggleMenu;
+    const hideLineBtn = document.getElementById('hideLineBtn');
+    if (hideLineBtn) hideLineBtn.onclick = () => { showWaveLine = !showWaveLine; hideLineBtn.textContent = showWaveLine ? 'Hide Line' : 'Show Line'; };
     window.addEventListener('resize', onWindowResize);
-    window.toggleMenu = toggleMenu; // Expose to global scope
-    
-    // Waveform canvas drag handlers for seeking
+    window.toggleMenu = toggleMenu;
     setupWaveformDragHandlers();
 }
 
-// Start initialization and animation
-init();
-animate();
+function initCanvases() {
+    waveCanvas = document.getElementById("waveform");
+    if (waveCanvas) { waveCtx = waveCanvas.getContext("2d"); resizeWaveCanvas(); }
+    freqLeftCanvas = document.getElementById("freqLeft");
+    if (freqLeftCanvas) { freqLeftCtx = freqLeftCanvas.getContext("2d"); resizeFreqCanvas(freqLeftCanvas); }
+    freqRightCanvas = document.getElementById("freqRight");
+    if (freqRightCanvas) { freqRightCtx = freqRightCanvas.getContext("2d"); resizeFreqCanvas(freqRightCanvas); }
+}
 
-function createSpheres() {
-    for(let s = 0; s < TOTAL_SPHERES; s++) {
+function clearParticles() {
+    particles.forEach(p => scene.remove(p));
+    particles = [];
+}
+
+function createParticles(shape) {
+    clearParticles();
+    currentShape = shape;
+    switch(shape) {
+        case 'octahedron':
+            createTetrahedronParticles();
+            break;
+        case 'cylinder':
+            createCylinderParticles();
+            break;
+        case 'torus':
+            createTorusParticles();
+            break;
+        case 'spiral':
+            createSpiralParticles();
+            break;
+        case 'sphere':
+        default:
+            createSphereParticles();
+    }
+}
+
+function createSphereParticles() {
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
         const geometry = new THREE.BufferGeometry();
-        const posArray = new Float32Array(PARTICLE_COUNT_PER_SPHERE * 3);
-        const originalPos = new Float32Array(PARTICLE_COUNT_PER_SPHERE * 3);
-        const randoms = new Float32Array(PARTICLE_COUNT_PER_SPHERE); // For variation
-
-        const baseRadius = 2.0 + (s * 0.3); // Spheres get slightly larger
-
-        for(let i = 0; i < PARTICLE_COUNT_PER_SPHERE; i++) {
-            // Random point on sphere surface
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const baseRadius = 2.0 + (s * 0.3);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
             const theta = Math.random() * Math.PI * 2;
             const phi = Math.acos((Math.random() * 2) - 1);
-            
             const x = baseRadius * Math.sin(phi) * Math.cos(theta);
             const y = baseRadius * Math.sin(phi) * Math.sin(theta);
             const z = baseRadius * Math.cos(phi);
-
             posArray[i*3] = x;
             posArray[i*3+1] = y;
             posArray[i*3+2] = z;
-
             originalPos[i*3] = x;
             originalPos[i*3+1] = y;
             originalPos[i*3+2] = z;
-
             randoms[i] = Math.random();
         }
-
         geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        
-        const material = new THREE.PointsMaterial({
-            color: COLORS[s],
-            size: 0.05,
-            transparent: true,
-            opacity: 0.6,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false
-        });
-
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.05, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false });
         const points = new THREE.Points(geometry, material);
-        
-        // Give each sphere a unique random rotation axis
-        points.userData = {
-            originalPos: originalPos,
-            randoms: randoms,
-            radius: baseRadius,
-            rotationSpeed: {
-                x: (Math.random() - 0.5) * 0.01,
-                y: (Math.random() - 0.5) * 0.01,
-                z: (Math.random() - 0.5) * 0.01
-            },
-            layerIndex: s
-        };
-
+        points.userData = { originalPos, randoms, radius: baseRadius, type: 'sphere', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
         scene.add(points);
         particles.push(points);
     }
 }
 
-// ==========================================
-// ANIMATION LOOP
-// ==========================================
+function createTetrahedronParticles() {
+    const radius = 2.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupScale = 1.0 + (s * 0.15);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            let x = (Math.random() * 2 - 1) * radius;
+            let y = (Math.random() * 2 - 1) * radius;
+            let z = (Math.random() * 2 - 1) * radius;
+            let length = Math.sqrt(x*x + y*y + z*z);
+            x /= length; y /= length; z /= length;
+            const projFactor = radius / (Math.abs(x) + Math.abs(y) + Math.abs(z));
+            x *= projFactor * groupScale * 0.8;
+            y *= projFactor * groupScale * 0.8;
+            z *= projFactor * groupScale * 0.8;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.03, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius, type: 'octahedron', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createCylinderParticles() {
+    const cylinderHeight = 8;
+    const cylinderRadius = 0.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupRadius = cylinderRadius + (s * 0.1);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const h = Math.random();
+            const theta = Math.random() * Math.PI * 2;
+            const r = groupRadius + (Math.random() - 0.5) * 0.2;
+            const x = r * Math.cos(theta);
+            const z = r * Math.sin(theta);
+            const y = (h - 0.5) * cylinderHeight;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.04, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: groupRadius, type: 'cylinder', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createTorusParticles() {
+    const tubeRadius = 1.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const innerRadius = 2.5 + (s * 0.3);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const u = Math.random() * Math.PI * 2;
+            const v = Math.random() * Math.PI * 2;
+            const x = (innerRadius + tubeRadius * Math.cos(v)) * Math.cos(u);
+            const y = tubeRadius * Math.sin(v);
+            const z = (innerRadius + tubeRadius * Math.cos(v)) * Math.sin(u);
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.04, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: innerRadius, type: 'torus', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createSpiralParticles() {
+    const spiralHeight = 10;
+    const spiralRadius = 1.5;
+    const turns = 1.2;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupRadius = spiralRadius + (s * 0.1);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const t = i / PARTICLE_COUNT_PER_GROUP;
+            const theta = t * Math.PI * 2 * turns;
+            const r = groupRadius + (Math.random() - 0.5) * 0.1;
+            const x = r * Math.cos(theta);
+            const z = r * Math.sin(theta);
+            const y = (t - 0.5) * spiralHeight;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.03, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: groupRadius, type: 'spiral', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
 function animate() {
     requestAnimationFrame(animate);
     time += 0.005;
 
-    // 1. Get Audio Data
     let bands = new Array(10).fill(0);
     if (analyser && dataArray) {
         analyser.getByteFrequencyData(dataArray);
-        // Split frequency spectrum into 10 bands
         const binSize = Math.floor(dataArray.length / 10);
         for (let i = 0; i < 10; i++) {
             let sum = 0;
-            for (let j = 0; j < binSize; j++) {
-                sum += dataArray[i * binSize + j];
-            }
-            bands[i] = (sum / binSize) / 255; // Normalize 0-1
+            for (let j = 0; j < binSize; j++) sum += dataArray[i * binSize + j];
+            bands[i] = (sum / binSize) / 255;
         }
     }
 
-    // 2. Smooth the Audio (LERP)
-    // This prevents the visualization from jittering too aggressively
-    for(let i=0; i<10; i++) {
-        smoothedAudio[i] += (bands[i] - smoothedAudio[i]) * 0.45;
-    }
+    for(let i=0; i<10; i++) smoothedAudio[i] += (bands[i] - smoothedAudio[i]) * 0.15;
+    const bassIntensity = smoothedAudio[0];
+    const trebleIntensity = smoothedAudio[9];
+    const emotionFactor = bassIntensity * 0.5 + trebleIntensity * 0.5;
+    const densityRaw = (smoothedAudio[0] * 5 + smoothedAudio[1] + smoothedAudio[2] + smoothedAudio[3] + smoothedAudio[4]) / 6;
+    const densityFactor = densityRaw * 0.6 + 0.4;
+    if (ambientLight) ambientLight.intensity = 0.01 + densityFactor * 0.03;
+    if (window.bloomPass) window.bloomPass.strength = 2.0 + densityFactor * 1.5;
 
-    // 3. Update Particles
     particles.forEach((p, idx) => {
         const positions = p.geometry.attributes.position.array;
         const originals = p.userData.originalPos;
         const rand = p.userData.randoms;
-        const intensity = smoothedAudio[idx]; 
+        const particleType = p.userData.type;
+        const intensity = smoothedAudio[idx];
         
-        // Rotate entire sphere
-        p.rotation.x += p.userData.rotationSpeed.x + (intensity * 0.02);
-        p.rotation.y += p.userData.rotationSpeed.y + (intensity * 0.02);
+        p.rotation.x += p.userData.rotationSpeed.x + (densityFactor * 0.02);
+        p.rotation.y += p.userData.rotationSpeed.y + (densityFactor * 0.03);
 
-        // Morph particles
-        for(let i = 0; i < PARTICLE_COUNT_PER_SPHERE; i++) {
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
             const ix = i * 3;
             const ox = originals[ix];
             const oy = originals[ix+1];
             const oz = originals[ix+2];
-
-            // Noise / Wave Calculation
-            // We create a "wave" effect that travels across the sphere
-            const vibration = Math.sin(time * 5 + ox + intensity * 10) * 0.1;
-            const noise = Math.cos(time * 3 + oy * 2) * Math.sin(time * 2 + oz * 2) * 0.3;
-            
-            // Explosion magnitude based on audio
-            // Inner spheres react to Bass (idx 0), Outer to Treble (idx 9)
-            const explosion = 1 + (intensity * (0.8 + rand[i] * 0.5)); 
-
-            const scale = explosion + vibration + noise;
-
-            positions[ix]   = ox * scale;
-            positions[ix+1] = oy * scale;
-            positions[ix+2] = oz * scale;
+            const vibration = Math.sin(time * 8 + ox * 2 + intensity * 15) * 0.10;
+            const noise = Math.cos(time * 5 + oy * 3) * Math.sin(time * 4 + oz * 3) * 0.4;
+            const explosion = 1 + (intensity * (1.5 + rand[i] * 0.5));
+            let finalMagnitude;
+            const magnitude = Math.sqrt(ox*ox + oy*oy + oz*oz);
+            const dirX = ox / magnitude;
+            const dirY = oy / magnitude;
+            const dirZ = oz / magnitude;
+            switch (particleType) {
+                case 'sphere':
+                    finalMagnitude = magnitude * explosion + vibration + noise;
+                    positions[ix]   = dirX * finalMagnitude;
+                    positions[ix+1] = dirY * finalMagnitude;
+                    positions[ix+2] = dirZ * finalMagnitude;
+                    break;
+                case 'octahedron':
+                    positions[ix]   = ox * (1 + intensity * 1.5) + vibration;
+                    positions[ix+1] = oy * (1 + intensity * 1.5) + vibration;
+                    positions[ix+2] = oz * (1 + intensity * 1.5) + vibration;
+                    break;
+                case 'cylinder':
+                    positions[ix]   = ox * explosion;
+                    positions[ix+1] = oy + intensity * 1.5 * Math.sin(time * 5 + rand[i] * 5);
+                    positions[ix+2] = oz * explosion;
+                    break;
+                case 'torus':
+                    finalMagnitude = magnitude * (1 + intensity * 0.5);
+                    positions[ix]   = dirX * finalMagnitude;
+                    positions[ix+1] = dirY * finalMagnitude * explosion;
+                    positions[ix+2] = dirZ * finalMagnitude;
+                    break;
+                case 'spiral':
+                    positions[ix]   = ox * explosion;
+                    positions[ix+1] = oy + intensity * 2.0 * Math.sin(time * 8 + rand[i] * 5);
+                    positions[ix+2] = oz * explosion;
+                    break;
+            }
         }
-        
         p.geometry.attributes.position.needsUpdate = true;
-        
-        // Pulse size and opacity
-        p.material.size = 0.04 + (intensity * 0.08);
-        p.material.opacity = 0.3 + (intensity * 0.7);
+        p.material.size = 0.04 + (intensity * 0.15);
+        p.material.opacity = 0.2 + (intensity * 0.8);
     });
 
-    // 4. Camera movement (Gentle Orbit)
-    camera.position.x = Math.sin(time * 0.5) * 12;
-    camera.position.z = Math.cos(time * 0.5) * 12;
+    const cameraDistance = 12 - (emotionFactor * 3);
+    camera.position.x = Math.sin(time * 0.5 * densityFactor) * cameraDistance;
+    camera.position.z = Math.cos(time * 0.5 * densityFactor) * cameraDistance;
+    const shake = bassIntensity * 2;
+    camera.position.y = Math.sin(time * 15) * shake * 0.1;
+    camera.position.z += Math.cos(time * 7) * shake * 0.1;
     camera.lookAt(0,0,0);
-
-    // 5. Render with Bloom
     composer.render();
-    
-    // 6. Update waveform visualization
     drawWaveform();
-    
-    // 7. Update frequency visualizers
     drawFrequencyVisualizers();
-    
-    // FPS update (rough)
-    // document.getElementById('fpsCounter').innerText = 'Time: ' + time.toFixed(2);
 }
 
-// ==========================================
-// AUDIO HANDLING
-// ==========================================
-async function uploadAndPlay() {
-    const fileInput = document.getElementById('audioFile');
-    const file = fileInput.files[0];
-    if (!file) return alert('Please select a file');
-    
-    sound_mode = 'up';
-
-    // Convert file into local Object URL
-    const localUrl = URL.createObjectURL(file);
-
-    // Play it using your existing function
-    setupAudio(localUrl);
-}
-
-
-function useMicrophone() {
-    // Set mode first so connectAnalyser knows not to connect to destination
-    sound_mode = 'mic';
-    
-    // Stop any playing audio file
+function stopAudioSource() {
     if (audioSource) {
-        try {
-            audioSource.stop();
-        } catch(e) {}
-        try {
-            audioSource.disconnect();
-        } catch(e) {}
+        try { audioSource.stop(); } catch(e) {}
+        try { audioSource.disconnect(); } catch(e) {}
         audioSource = null;
     }
-    
-    // Disconnect analyser from destination if connected
-    if (analyser) {
-        try {
-            analyser.disconnect();
-        } catch(e) {}
+}
+
+function uploadAndPlay() {
+    const input = document.getElementById('audioFile');
+    if (!input) return;
+    const uploadBtn = document.getElementById('uploadBtn');
+    const file = input.files && input.files[0];
+    if (file) {
+        sound_mode = 'up';
+        hidePlayFileOptions();
+        setupAudioFromFile(file);
+        return;
     }
-    
-    // Clear file playback state
-    playbackStartTime = null;
-    playbackOffset = 0;
-    audioBuffer = null;
-    waveformData = null;
-    
+    const hasPrevious = !!(lastFileBuffer || lastMediaUrl);
+    const shouldOfferResume = (sound_mode === 'mic') && hasPrevious;
+    if (shouldOfferResume && uploadBtn) {
+        showPlayFileOptions();
+        return;
+    }
+    const handler = () => { uploadAndPlay(); };
+    input.addEventListener('change', handler, { once: true });
+    try { input.click(); } catch(e) {}
+}
+
+function showPlayFileOptions() {
+    const existing = document.getElementById('playFileOptions');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const input = document.getElementById('audioFile');
+    if (!uploadBtn || !input) return;
+    if (existing) existing.remove();
+    const wrap = document.createElement('div');
+    wrap.id = 'playFileOptions';
+    wrap.style.display = 'grid';
+    wrap.style.gap = '6px';
+    wrap.style.marginTop = '6px';
+    const btnContinue = document.createElement('button');
+    btnContinue.textContent = 'Continue Existing File';
+    const btnUpload = document.createElement('button');
+    btnUpload.textContent = 'Upload New File';
+    btnContinue.onclick = () => { resumePreviousFile(); hidePlayFileOptions(); };
+    btnUpload.onclick = () => {
+        const handler = () => { uploadAndPlay(); };
+        input.addEventListener('change', handler, { once: true });
+        try { input.click(); } catch(e) {}
+        hidePlayFileOptions();
+    };
+    wrap.appendChild(btnContinue);
+    wrap.appendChild(btnUpload);
+    uploadBtn.insertAdjacentElement('afterend', wrap);
+}
+
+function hidePlayFileOptions() {
+    const existing = document.getElementById('playFileOptions');
+    if (existing) existing.remove();
+}
+
+function resumePreviousFile() {
+    sound_mode = 'up';
+    if (!audioCtx || audioCtx.state === 'closed') {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    try { audioCtx.resume(); } catch(e) {}
+    if (lastFileBuffer) {
+        audioBuffer = lastFileBuffer;
+        waveformData = lastFileWaveform || waveformData;
+        playbackOffset = 0;
+        isPaused = false;
+        pauseTime = 0;
+        micWaveformHistory = [];
+        startPlayback(0);
+        updatePlayPauseButton();
+        return;
+    }
+    if (lastMediaUrl) {
+        audioBuffer = null;
+        waveformData = null;
+        const el = new Audio();
+        el.src = lastMediaUrl;
+        el.crossOrigin = 'anonymous';
+        el.preload = 'auto';
+        el.loop = false;
+        mediaElement = el;
+        const source = audioCtx.createMediaElementSource(el);
+        mediaSource = source;
+        connectAnalyser(source);
+        try { el.play(); } catch(e) {}
+        updatePlayPauseButton();
+        el.onended = () => {
+            try { el.pause(); } catch(e) {}
+            try { el.currentTime = 0; } catch(e) {}
+            updatePlayPauseButton();
+        };
+    }
+}
+
+function useMicrophone() {
+    sound_mode = 'mic';
+    stopAudioSource();
+    if (mediaElement) {
+        try { mediaElement.pause(); } catch(e) {}
+        try { mediaElement.src = ''; } catch(e) {}
+        mediaElement = null;
+    }
+    if (mediaSource) {
+        try { mediaSource.disconnect(); } catch(e) {}
+        mediaSource = null;
+    }
+    if (analyser) { try { analyser.disconnect(); } catch(e) {} }
+    playbackStartTime = playbackOffset = 0;
+    audioBuffer = waveformData = null;
+    const input = document.getElementById('audioFile');
+    if (input) { try { input.value = ''; } catch(e) {} }
+    hidePlayFileOptions();
+    updatePlayPauseButton();
     navigator.mediaDevices.getUserMedia({ audio: true })
-    .then(stream => {
-        setupAudioStream(stream);
-    }).catch(e => alert('Mic denied'));
+        .then(stream => setupAudioStream(stream))
+        .catch(e => alert('Mic denied'));
 }
 
 function setupAudio(url) {
     if (audioCtx) audioCtx.close();
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    waveformData = audioBuffer = audioSource = null;
+    playbackStartTime = playbackOffset = 0;
+    micWaveformHistory = [];
     
-    // Reset waveform data
+    fetch(url).then(r => r.arrayBuffer())
+        .then(buffer => audioCtx.decodeAudioData(buffer))
+        .then(decoded => {
+            audioBuffer = decoded;
+            generateWaveformData(decoded);
+            isPaused = pauseTime = playbackOffset = 0;
+            updatePlayPauseButton();
+            startPlayback(0);
+        });
+}
+
+async function setupAudioFromFile(file) {
+    if (!audioCtx || audioCtx.state === 'closed') {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    try { await audioCtx.resume(); } catch(e) {}
     waveformData = null;
     audioBuffer = null;
     audioSource = null;
     playbackStartTime = null;
     playbackOffset = 0;
     micWaveformHistory = [];
-    
-    fetch(url)
-        .then(r => r.arrayBuffer())
-        .then(buffer => audioCtx.decodeAudioData(buffer))
-        .then(decoded => {
-            audioBuffer = decoded;
-            // Generate waveform data from the entire buffer
-            generateWaveformData(decoded);
-            
-            // Reset pause state when new file is loaded
-            isPaused = false;
-            pauseTime = 0;
-            playbackOffset = 0;
+    isPaused = false;
+    pauseTime = 0;
+    if (mediaElement) {
+        try { mediaElement.pause(); } catch(e) {}
+        try { mediaElement.src = ''; } catch(e) {}
+        mediaElement = null;
+    }
+    if (mediaSource) {
+        try { mediaSource.disconnect(); } catch(e) {}
+        mediaSource = null;
+    }
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const decoded = await decodeArrayBuffer(arrayBuffer);
+        audioBuffer = decoded;
+        generateWaveformData(decoded);
+        isPaused = false;
+        pauseTime = 0;
+        playbackOffset = 0;
+        updatePlayPauseButton();
+        startPlayback(0);
+        lastFileBuffer = decoded;
+        lastFileWaveform = waveformData;
+        lastMediaUrl = null;
+        const inputEl = document.getElementById('audioFile');
+        if (inputEl) { try { inputEl.value = ''; } catch(e) {} }
+    } catch(err) {
+        const url = URL.createObjectURL(file);
+        if (!audioCtx || audioCtx.state === 'closed') {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        try { await audioCtx.resume(); } catch(e) {}
+        const el = new Audio();
+        el.src = url;
+        el.crossOrigin = 'anonymous';
+        el.preload = 'auto';
+        el.loop = false;
+        mediaElement = el;
+        const source = audioCtx.createMediaElementSource(el);
+        mediaSource = source;
+        connectAnalyser(source);
+        try { await el.play(); } catch(e) {}
+        updatePlayPauseButton();
+        el.onended = () => {
+            try { el.pause(); } catch(e) {}
+            try { el.currentTime = 0; } catch(e) {}
             updatePlayPauseButton();
-            startPlayback(0);
-        });
+        };
+        lastFileBuffer = null;
+        lastFileWaveform = null;
+        lastMediaUrl = url;
+        const inputEl = document.getElementById('audioFile');
+        if (inputEl) { try { inputEl.value = ''; } catch(e) {} }
+    }
+}
+
+function decodeArrayBuffer(buffer) {
+    return new Promise((resolve, reject) => {
+        try {
+            audioCtx.decodeAudioData(buffer, resolve, reject);
+        } catch(e) {
+            audioCtx.decodeAudioData(buffer).then(resolve).catch(reject);
+        }
+    });
 }
 
 function startPlayback(offset) {
-    if (!audioBuffer || !audioCtx) return;
-    
-    // Check if audio context is valid
-    if (audioCtx.state === 'closed') {
-        console.error('Audio context is closed');
-        return;
-    }
-    
-    // Resume audio context if suspended
-    if (audioCtx.state === 'suspended') {
-        audioCtx.resume().catch(e => console.error('Failed to resume audio context:', e));
-    }
+    if (!audioBuffer || !audioCtx || audioCtx.state === 'closed') return;
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(e => console.error('Failed to resume:', e));
     
     // Stop current source if playing
-    if (audioSource) {
-        try {
-            audioSource.stop();
-        } catch(e) {
-            // Source might already be stopped
-        }
-        try {
-            audioSource.disconnect();
-        } catch(e) {
-            // Source might already be disconnected
-        }
-        audioSource = null;
-    }
+    stopAudioSource();
+    
+    // Ensure offset is valid
+    const validOffset = Math.max(0, Math.min(offset, audioBuffer.duration));
     
     try {
         const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
         audioSource = source;
-        playbackOffset = Math.max(0, Math.min(offset, audioBuffer.duration));
+        playbackOffset = validOffset; // Use the validated offset
         playbackStartTime = audioCtx.currentTime;
         isPaused = false;
         pauseTime = 0;
         
         connectAnalyser(source);
         source.start(0, playbackOffset);
-        
-        // Update play/pause button
         updatePlayPauseButton();
         
-        // Handle end of playback
         source.onended = () => {
-            playbackStartTime = null;
+            if (source !== audioSource) return;
             playbackOffset = 0;
-            isPaused = false;
-            pauseTime = 0;
+            playbackStartTime = null;
+            isPaused = true;
             audioSource = null;
             updatePlayPauseButton();
         };
     } catch(e) {
         console.error('Failed to start playback:', e);
         audioSource = null;
+        isPaused = false;
         updatePlayPauseButton();
     }
 }
 
 function togglePlayPause() {
-    if (!audioBuffer || sound_mode !== 'up' || !audioCtx) return;
+    if (sound_mode !== 'up' || !audioCtx) return;
+    if (mediaElement && !audioBuffer) {
+        if (mediaElement.paused) { try { mediaElement.play(); } catch(e) {} }
+        else { try { mediaElement.pause(); } catch(e) {} }
+        updatePlayPauseButton();
+        return;
+    }
+    if (!audioBuffer) return;
     
     if (isPaused) {
-        // Resume playback from where we paused - preserve the offset
+        // Resume: start playback from saved offset (don't recalculate)
         const resumeOffset = playbackOffset;
-        if (resumeOffset >= 0 && resumeOffset < audioBuffer.duration) {
+        if (resumeOffset >= 0 && resumeOffset <= audioBuffer.duration) {
             startPlayback(resumeOffset);
+        } else {
+            // If offset is invalid, start from beginning
+            playbackOffset = 0;
+            startPlayback(0);
         }
-    } else if (!audioSource) {
-        // No source playing, start from current offset or beginning
-        const startOffset = playbackOffset > 0 ? playbackOffset : 0;
-        startPlayback(startOffset);
     } else {
-        // Pause playback - save current position
+        // Pause: stop and save current position
         if (audioSource && playbackStartTime !== null) {
-            try {
-                audioSource.stop();
-            } catch(e) {}
-            try {
-                audioSource.disconnect();
-            } catch(e) {}
-            
-            // Calculate current position before stopping - this is critical
+            // Calculate current position accurately before stopping
             const elapsed = audioCtx.currentTime - playbackStartTime;
-            const newOffset = Math.max(0, Math.min(elapsed + playbackOffset, audioBuffer.duration));
-            
-            // Save the position
-            playbackOffset = newOffset;
-            pauseTime = audioCtx.currentTime;
+            playbackOffset = Math.max(0, Math.min(elapsed + playbackOffset, audioBuffer.duration));
+            stopAudioSource();
             playbackStartTime = null;
-            audioSource = null;
         }
+        // If no source, keep the current offset (don't reset it)
         isPaused = true;
         updatePlayPauseButton();
     }
@@ -450,41 +634,40 @@ function togglePlayPause() {
 function updatePlayPauseButton() {
     const btn = document.getElementById('playPauseBtn');
     if (!btn) return;
-    
-    // Only show in file upload mode, never in mic mode
-    if (sound_mode === 'up' && audioBuffer) {
+    if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
         btn.style.display = 'flex';
-        if (isPaused || !audioSource) {
-            btn.textContent = '▶';
-        } else {
-            btn.textContent = '⏸';
+        if (audioBuffer) {
+            btn.textContent = (isPaused || !audioSource) ? '▶' : '⏸';
+        } else if (mediaElement) {
+            btn.textContent = mediaElement.paused ? '▶' : '⏸';
         }
     } else {
-        // Hide in mic mode or when no audio
         btn.style.display = 'none';
     }
 }
 
 function seekToPosition(progress) {
-    if (!audioBuffer || !audioCtx) return;
-    
-    // Don't seek if already seeking or if context is closing
-    if (audioCtx.state === 'closed') return;
-    
-    // Ensure audio context is running
-    if (audioCtx.state === 'suspended') {
-        audioCtx.resume().catch(e => console.error('Failed to resume audio context:', e));
+    if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+        if (!mediaElement || !isFinite(mediaElement.duration) || mediaElement.duration <= 0) return;
+        const seekTimeEl = Math.max(0, Math.min(progress * mediaElement.duration, mediaElement.duration));
+        try { mediaElement.currentTime = seekTimeEl; } catch(e) {}
+        return;
     }
+    if (!audioBuffer || !audioCtx || audioCtx.state === 'closed') return;
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(e => console.error('Failed to resume:', e));
     
     const seekTime = Math.max(0, Math.min(progress * audioBuffer.duration, audioBuffer.duration));
     
+    // Always update the offset first
+    playbackOffset = seekTime;
+    
     // If paused, just update the offset without starting playback
     if (isPaused) {
-        playbackOffset = seekTime;
+        playbackStartTime = null;
         return;
     }
     
-    // Otherwise, seek and start playback
+    // If playing, seek to the new position and continue playing
     isPaused = false;
     pauseTime = 0;
     startPlayback(seekTime);
@@ -493,39 +676,51 @@ function seekToPosition(progress) {
 function setupAudioStream(stream) {
     if (audioCtx) audioCtx.close();
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    
-    // Reset waveform data for file mode
-    waveformData = null;
-    audioBuffer = null;
-    audioSource = null;
-    playbackStartTime = null;
+    waveformData = audioBuffer = audioSource = null;
+    playbackStartTime = 0;
     micWaveformHistory = [];
     micStartTime = Date.now();
-    
-    const source = audioCtx.createMediaStreamSource(stream);
-    connectAnalyser(source);
+    connectAnalyser(audioCtx.createMediaStreamSource(stream));
 }
 
 function connectAnalyser(source) {
-    // Disconnect old analyser from destination if connected
-    if (analyser) {
-        try {
-            analyser.disconnect();
-        } catch(e) {}
-    }
+    if (!source || !audioCtx) return;
+    if (analyser) { try { analyser.disconnect(); } catch(e) {} }
+    if (leftAnalyser) { try { leftAnalyser.disconnect(); } catch(e) {} leftAnalyser = null; }
+    if (rightAnalyser) { try { rightAnalyser.disconnect(); } catch(e) {} rightAnalyser = null; }
+    if (splitterNode) { try { splitterNode.disconnect(); } catch(e) {} splitterNode = null; }
     
-    // Create new analyser
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
     analyser.smoothingTimeConstant = 0.8;
     dataArray = new Uint8Array(analyser.frequencyBinCount);
     
-    // Connect source to analyser
-    source.connect(analyser);
+    try {
+        source.connect(analyser);
+        if (sound_mode !== 'mic') analyser.connect(audioCtx.destination);
+    } catch(e) {
+        console.error('Failed to connect analyser:', e);
+    }
     
-    // Connect analyser to destination only if not in mic mode
     if (sound_mode !== 'mic') {
-        analyser.connect(audioCtx.destination);
+        try {
+            splitterNode = audioCtx.createChannelSplitter(2);
+            source.connect(splitterNode);
+            leftAnalyser = audioCtx.createAnalyser();
+            rightAnalyser = audioCtx.createAnalyser();
+            leftAnalyser.fftSize = 512;
+            rightAnalyser.fftSize = 512;
+            leftAnalyser.smoothingTimeConstant = 0.8;
+            rightAnalyser.smoothingTimeConstant = 0.8;
+            dataArrayLeft = new Uint8Array(leftAnalyser.frequencyBinCount);
+            dataArrayRight = new Uint8Array(rightAnalyser.frequencyBinCount);
+            splitterNode.connect(leftAnalyser, 0);
+            splitterNode.connect(rightAnalyser, 1);
+        } catch(e) {
+        }
+    } else {
+        dataArrayLeft = null;
+        dataArrayRight = null;
     }
 }
 
@@ -534,144 +729,96 @@ function onWindowResize() {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
     composer.setSize(window.innerWidth, window.innerHeight);
-    // Also resize waveform canvas
     resizeWaveCanvas();
-    // Also resize frequency canvases
-    try {
-        resizeFreqCanvas(freqLeftCanvas);
-    } catch(e) {}
-    try {
-        resizeFreqCanvas(freqRightCanvas);
-    } catch(e) {}
 }
 
 function resizeWaveCanvas() {
-    if (waveCanvas) {
-        const rect = waveCanvas.getBoundingClientRect();
-        const newWidth = Math.floor(rect.width);
-        const newHeight = Math.floor(rect.height);
-        
-        // Only resize if dimensions actually changed
-        if (waveCanvas.width !== newWidth || waveCanvas.height !== newHeight) {
-            waveCanvas.width = newWidth;
-            waveCanvas.height = newHeight;
-            
-            // Re-get context if needed (shouldn't be necessary, but safety check)
-            if (!waveCtx) {
-                waveCtx = waveCanvas.getContext("2d");
-            }
-        }
+    if (!waveCanvas) return;
+    const rect = waveCanvas.getBoundingClientRect();
+    const newWidth = Math.floor(rect.width);
+    const newHeight = Math.floor(rect.height);
+    if (waveCanvas.width !== newWidth || waveCanvas.height !== newHeight) {
+        waveCanvas.width = newWidth;
+        waveCanvas.height = newHeight;
+        if (!waveCtx) waveCtx = waveCanvas.getContext("2d");
     }
 }
-window.addEventListener("resize", resizeWaveCanvas);
 
-// Ensure frequency canvases match CSS size and devicePixelRatio
 function resizeFreqCanvas(canvas) {
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const cssWidth = Math.floor(rect.width) || 0;
-    const cssHeight = Math.floor(rect.height) || 0;
-    const dpr = window.devicePixelRatio || 1;
-
-    const pixelWidth = Math.max(0, Math.floor(cssWidth * dpr));
-    const pixelHeight = Math.max(0, Math.floor(cssHeight * dpr));
-
-    // Only update if actual drawing buffer size changed
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-        canvas.width = pixelWidth;
-        canvas.height = pixelHeight;
-        // Keep CSS size in sync
-        canvas.style.width = cssWidth + 'px';
-        canvas.style.height = cssHeight + 'px';
-
-        // Reset transform on the context so drawing uses CSS pixels
-        const ctx = canvas.getContext('2d');
-        if (ctx && typeof ctx.setTransform === 'function') {
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        }
-    }
+    if (canvas) { canvas.width = 20; canvas.height = window.innerHeight * 0.6; }
 }
 
-// When the window resizes, update both waveform and frequency canvases
-window.addEventListener('resize', () => {
+window.addEventListener("resize", () => {
     resizeWaveCanvas();
-    try { resizeFreqCanvas(freqLeftCanvas); } catch(e) {}
-    try { resizeFreqCanvas(freqRightCanvas); } catch(e) {}
+    if (freqLeftCanvas) resizeFreqCanvas(freqLeftCanvas);
+    if (freqRightCanvas) resizeFreqCanvas(freqRightCanvas);
 });
 
 function generateWaveformData(buffer) {
-    // Generate waveform peaks from audio buffer
-    const samples = buffer.length;
-    const sampleRate = buffer.sampleRate;
-    const channelData = buffer.getChannelData(0); // Use first channel
-    
-    // Downsample to ~2000 points for performance
+    const channelData = buffer.getChannelData(0);
     const targetPoints = 2000;
-    const step = Math.floor(samples / targetPoints);
+    const step = Math.floor(buffer.length / targetPoints);
     waveformData = [];
     
     for (let i = 0; i < targetPoints; i++) {
         const start = i * step;
-        const end = Math.min(start + step, samples);
-        
+        const end = Math.min(start + step, buffer.length);
         let sum = 0;
-        for (let j = start; j < end; j++) {
-            // Use actual audio value (can be negative) for centered wave
-            sum += channelData[j];
-        }
-        
-        // Store average (audio values are -1 to 1, we'll normalize in drawing)
-        const avg = sum / step;
-        waveformData.push({
-            avg: avg, // Keep as -1 to 1 range for proper centered wave
-            peak: Math.abs(avg)
-        });
+        for (let j = start; j < end; j++) sum += channelData[j];
+        waveformData.push({ avg: sum / step, peak: Math.abs(sum / step) });
     }
 }
 
 function drawWaveform() {
     if (!waveCanvas) return;
-    
-    // Ensure context is valid
-    if (!waveCtx) {
-        waveCtx = waveCanvas.getContext("2d");
-        if (!waveCtx) return;
-    }
-    
-    if (!analyser || !dataArray) {
-        // Hide timer if no audio
-        const timerEl = document.getElementById('audioTimer');
-        if (timerEl) timerEl.textContent = '';
+    if (!waveCtx) { waveCtx = waveCanvas.getContext("2d"); if (!waveCtx) return; }
+
+    const ctx = waveCtx, w = waveCanvas.width, h = waveCanvas.height;
+    if (w <= 0 || h <= 0) return;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!showWaveLine) {
         waveCanvas.style.cursor = 'default';
+        if (sound_mode === 'up' && audioBuffer) {
+            const duration = audioBuffer.duration || 0;
+            let currentTime = playbackOffset;
+            if (!isPaused && playbackStartTime !== null && audioCtx) {
+                const elapsed = audioCtx.currentTime - playbackStartTime;
+                currentTime = Math.min(Math.max(playbackOffset + elapsed, 0), duration);
+            }
+            updateTimer(currentTime, duration);
+            updatePlayPauseButton();
+        } else if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+            const ct = mediaElement && isFinite(mediaElement.currentTime) ? mediaElement.currentTime : 0;
+            const dur = mediaElement && isFinite(mediaElement.duration) ? mediaElement.duration : 0;
+            updateTimer(ct, dur);
+            updatePlayPauseButton();
+        } else if (sound_mode === 'mic') {
+            const timerEl = document.getElementById('audioTimer');
+            if (timerEl) timerEl.textContent = '';
+            updatePlayPauseButton();
+        }
         return;
     }
 
-    const ctx = waveCtx;
-    const w = waveCanvas.width;
-    const h = waveCanvas.height;
-    
-    // Safety check for valid dimensions
-    if (w <= 0 || h <= 0) return;
-
-    ctx.clearRect(0, 0, w, h);
-
     if (sound_mode === 'up' && waveformData && audioBuffer) {
-        // Draw full waveform for uploaded file
-        if (waveCanvas) waveCanvas.style.cursor = 'pointer';
+        waveCanvas.style.cursor = 'pointer';
         drawFileWaveform(ctx, w, h);
-    } else if (sound_mode === 'mic') {
-        // Draw scrolling waveform for microphone
-        if (waveCanvas) waveCanvas.style.cursor = 'default';
+    } else if (sound_mode === 'mic' && analyser && dataArray) {
+        waveCanvas.style.cursor = 'default';
         drawMicWaveform(ctx, w, h);
-        // Hide play/pause button in mic mode
+        updatePlayPauseButton();
+    } else if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+        waveCanvas.style.cursor = 'pointer';
+        drawMicWaveform(ctx, w, h);
+        const ct = mediaElement && isFinite(mediaElement.currentTime) ? mediaElement.currentTime : 0;
+        const dur = mediaElement && isFinite(mediaElement.duration) ? mediaElement.duration : 0;
+        updateTimer(ct, dur);
         updatePlayPauseButton();
     } else {
-        // Hide timer if not in file mode
         const timerEl = document.getElementById('audioTimer');
         if (timerEl) timerEl.textContent = '';
-        if (waveCanvas) waveCanvas.style.cursor = 'default';
-        // Hide play/pause button when no audio
+        waveCanvas.style.cursor = 'default';
         updatePlayPauseButton();
     }
 }
@@ -679,153 +826,109 @@ function drawWaveform() {
 function drawFileWaveform(ctx, w, h) {
     if (!waveformData || !audioBuffer || !audioCtx) return;
     
-    // Calculate current playback position
-    let progress = 0;
-    let currentTime = playbackOffset; // Start with offset
-    let duration = audioBuffer.duration || 0;
-    
-    // If dragging, use drag progress instead of actual playback position
+    const duration = audioBuffer.duration || 0;
+    const computePosition = () => {
+        if (isPaused || playbackStartTime === null) return Math.max(0, Math.min(playbackOffset, duration));
+        const elapsed = (audioCtx ? audioCtx.currentTime : 0) - playbackStartTime;
+        return Math.max(0, Math.min(playbackOffset + elapsed, duration));
+    };
+    let currentTime;
+    let progress;
     if (dragProgress !== null) {
-        progress = dragProgress;
+        progress = Math.max(0, Math.min(dragProgress, 1));
         currentTime = progress * duration;
-    } else if (isPaused) {
-        // If paused, show paused position
-        currentTime = playbackOffset;
-        progress = duration > 0 ? Math.min(Math.max(playbackOffset / duration, 0), 1) : 0;
-    } else if (playbackStartTime !== null && audioCtx) {
-        const elapsed = audioCtx.currentTime - playbackStartTime;
-        currentTime = Math.max(elapsed + playbackOffset, 0);
-        // Clamp to duration
-        currentTime = Math.min(currentTime, duration);
-        progress = duration > 0 ? Math.min(Math.max(currentTime / duration, 0), 1) : 0;
     } else {
-        // If not playing yet, show the seek position
-        currentTime = playbackOffset;
-        progress = duration > 0 ? Math.min(Math.max(playbackOffset / duration, 0), 1) : 0;
+        currentTime = computePosition();
+        progress = duration > 0 ? Math.min(Math.max(currentTime / duration, 0), 1) : 0;
     }
     
-    const progressX = w * progress;
-    const progressIndex = Math.floor(progress * waveformData.length);
+    const progressX = w * progress, progressIndex = Math.floor(progress * waveformData.length);
+    const pointWidth = w / waveformData.length, centerY = h / 2, amplitudeMultiplier = 1.2;
     
-    const pointWidth = w / waveformData.length;
-    const centerY = h / 2;
-    const amplitudeMultiplier = 0.7; // Increased from 0.4
-    
-    // Draw unplayed portion (darker, single wave)
-    ctx.strokeStyle = "#0066ff";
-    ctx.globalAlpha = 0.3;
-    ctx.lineWidth = 2;
+    const gradFuture = ctx.createLinearGradient(0, 0, w, 0);
+    gradFuture.addColorStop(0, "rgba(0, 102, 255, 0.25)");
+    gradFuture.addColorStop(1, "rgba(0, 212, 255, 0.15)");
+    ctx.strokeStyle = gradFuture; ctx.globalAlpha = 1.0; ctx.lineWidth = 6;
     ctx.beginPath();
-    
     for (let i = progressIndex; i < waveformData.length; i++) {
-        const x = i * pointWidth;
-        const data = waveformData[i];
-        // data.avg is in -1 to 1 range, multiply by amplitude
-        const amplitude = data.avg * h * amplitudeMultiplier;
+        const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
         const y = centerY - amplitude;
-        
-        if (i === progressIndex) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
+        (i === progressIndex) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
     
-    // Draw played portion (bright, single wave)
-    ctx.strokeStyle = "#00d4ff";
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = 2.5;
+    const gradPast = ctx.createLinearGradient(0, 0, w, 0);
+    gradPast.addColorStop(0, "#00bfff");
+    gradPast.addColorStop(1, "#00d4ff");
+    ctx.strokeStyle = gradPast; ctx.globalAlpha = 0.35; ctx.lineWidth = 10;
     ctx.beginPath();
-    
     for (let i = 0; i <= progressIndex; i++) {
-        const x = i * pointWidth;
-        const data = waveformData[i];
-        // data.avg is in -1 to 1 range, multiply by amplitude
-        const amplitude = data.avg * h * amplitudeMultiplier;
+        const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
         const y = centerY - amplitude;
-        
-        if (i === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
+        (i === 0) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = gradPast; ctx.globalAlpha = 0.95; ctx.lineWidth = 5;
+    ctx.beginPath();
+    for (let i = 0; i <= progressIndex; i++) {
+        const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
+        const y = centerY - amplitude;
+        (i === 0) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
     ctx.stroke();
     
-    // Draw progress line (shorter, about 60% of height)
-    const lineHeight = h * 0.6;
-    const lineTop = (h - lineHeight) / 2;
-    ctx.strokeStyle = "#ffffff";
-    ctx.globalAlpha = 0.8;
-    ctx.lineWidth = 2;
+    const barWidth = Math.max(3, Math.floor(w * 0.003));
+    const indexClamped = Math.max(0, Math.min(progressIndex, waveformData.length - 1));
+    const energy = waveformData[indexClamped].peak;
+    const baseLen = Math.min(90, Math.max(40, h * 0.25));
+    const shortLen = Math.min(Math.max(baseLen + energy * 40, 30), Math.max(50, h * 0.35));
+    const yStart = centerY - shortLen / 2;
+    const yEnd = centerY + shortLen / 2;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 212, 255, 0.6)';
+    ctx.shadowBlur = 12;
+    const lineGrad = ctx.createLinearGradient(progressX, yStart, progressX, yEnd);
+    lineGrad.addColorStop(0, '#00bfff');
+    lineGrad.addColorStop(1, '#00d4ff');
+    ctx.strokeStyle = lineGrad;
+    ctx.lineWidth = barWidth;
+    ctx.globalAlpha = 1.0;
     ctx.beginPath();
-    ctx.moveTo(progressX, lineTop);
-    ctx.lineTo(progressX, lineTop + lineHeight);
+    ctx.moveTo(progressX, yStart);
+    ctx.lineTo(progressX, yEnd);
     ctx.stroke();
+    ctx.restore();
     
-    // Draw a small circle at the top of the progress line for better visibility
-    ctx.fillStyle = "#ffffff";
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(progressX, lineTop, 4, 0, Math.PI * 2);
-    ctx.fill();
-    
-    // Update timer display
     updateTimer(currentTime, duration);
 }
 
 function drawMicWaveform(ctx, w, h) {
-    // Get current waveform data
-    analyser.getByteTimeDomainData(dataArray);
-    
-    // Add current sample to history (average of the sample array)
+    const tdAnalyser = leftAnalyser || analyser;
+    const tdArray = leftAnalyser ? dataArrayLeft : dataArray;
+    if (!tdAnalyser || !tdArray) return;
+    tdAnalyser.getByteTimeDomainData(tdArray);
     let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-        sum += dataArray[i];
-    }
-    const avgValue = sum / dataArray.length;
-    micWaveformHistory.push(avgValue);
-    
-    // Keep only recent history
-    if (micWaveformHistory.length > MAX_MIC_HISTORY) {
-        micWaveformHistory.shift();
-    }
-    
+    for (let i = 0; i < tdArray.length; i++) sum += tdArray[i];
+    micWaveformHistory.push(sum / tdArray.length);
+    if (micWaveformHistory.length > MAX_MIC_HISTORY) micWaveformHistory.shift();
     if (micWaveformHistory.length === 0) return;
     
-    // Draw scrolling waveform (single wave)
-    const centerY = h / 2;
-    const sampleWidth = w / micWaveformHistory.length;
-    const amplitudeMultiplier = 1.0; // Increased amplitude
-    
-    ctx.strokeStyle = "#00d4ff";
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = 2;
-    
-    // Draw single wave
+    const centerY = h / 2, sampleWidth = w / micWaveformHistory.length;
+    ctx.strokeStyle = "#00d4ff"; ctx.globalAlpha = 0.9; ctx.lineWidth = 5;
     ctx.beginPath();
     let x = 0;
     for (let i = 0; i < micWaveformHistory.length; i++) {
         const v = micWaveformHistory[i] / 255;
-        const amplitude = (v - 0.5) * h * amplitudeMultiplier; // Center around 0.5
-        const y = centerY - amplitude;
-        
-        if (i === 0) {
-            ctx.moveTo(x, y);
-        } else {
-            ctx.lineTo(x, y);
-        }
-        
+        const amplitude = 1.5; // Increased amplitude multiplier
+        const y = centerY - ((v - 0.5) * h * amplitude);
+        (i === 0) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
         x += sampleWidth;
     }
     ctx.stroke();
-    
-    // Hide timer for mic mode
     const timerEl = document.getElementById('audioTimer');
     if (timerEl) timerEl.textContent = '';
 }
-
 
 function formatTime(seconds) {
     const mins = Math.floor(seconds / 60);
@@ -835,177 +938,160 @@ function formatTime(seconds) {
 
 function updateTimer(currentTime, duration) {
     const timerEl = document.getElementById('audioTimer');
-    if (timerEl) {
-        timerEl.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
-    }
+    if (timerEl) timerEl.textContent = `${formatTime(currentTime)} / ${formatTime(duration)}`;
 }
 
 function setupWaveformDragHandlers() {
     const canvas = waveCanvas;
     if (!canvas || dragHandlersAttached) return;
     
-    // Mouse events
-    const mouseDownHandler = (e) => {
-        if (sound_mode === 'up' && audioBuffer) {
-            e.preventDefault();
-            isDragging = true;
-            handleWaveformClick(e);
-        }
-    };
-    
-    const mouseMoveHandler = (e) => {
-        if (isDragging && sound_mode === 'up' && audioBuffer) {
-            e.preventDefault();
-            handleWaveformClick(e);
-        }
-    };
-    
-    const mouseUpHandler = () => {
+    const handleDragEnd = () => {
         if (isDragging) {
             isDragging = false;
-            // Seek to the final drag position when drag ends - this makes it snap in place
-            if (dragProgress !== null && audioBuffer && audioCtx) {
+            if (dragProgress !== null && (audioBuffer || mediaElement) && audioCtx) {
                 const finalProgress = dragProgress;
                 dragProgress = null;
-                // Use requestAnimationFrame to ensure we're not in the middle of a render
-                requestAnimationFrame(() => {
-                    seekToPosition(finalProgress);
-                });
+                requestAnimationFrame(() => seekToPosition(finalProgress));
             }
         }
     };
     
-    // Touch handlers
-    const touchStartHandler = (e) => {
-        if (sound_mode === 'up' && audioBuffer) {
+    canvas.addEventListener('mousedown', (e) => {
+        if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
+            e.preventDefault();
+            isDragging = true;
+            handleWaveformClick(e);
+        }
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+        if (isDragging && sound_mode === 'up' && (audioBuffer || mediaElement)) {
+            e.preventDefault();
+            handleWaveformClick(e);
+        }
+    });
+    
+    document.addEventListener('mouseup', handleDragEnd);
+    canvas.addEventListener('touchstart', (e) => {
+        if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
             isDragging = true;
             handleWaveformClick(e.touches[0]);
         }
-    };
-    
-    const touchMoveHandler = (e) => {
-        if (isDragging && sound_mode === 'up' && audioBuffer) {
+    });
+    document.addEventListener('touchmove', (e) => {
+        if (isDragging && sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
-            if (e.touches.length > 0) {
-                handleWaveformClick(e.touches[0]);
-            }
+            if (e.touches.length > 0) handleWaveformClick(e.touches[0]);
         }
-    };
-    
-    const touchEndHandler = () => {
-        if (isDragging) {
-            isDragging = false;
-            // Seek to the final drag position when drag ends - this makes it snap in place
-            if (dragProgress !== null && audioBuffer && audioCtx) {
-                const finalProgress = dragProgress;
-                dragProgress = null;
-                // Use requestAnimationFrame to ensure we're not in the middle of a render
-                requestAnimationFrame(() => {
-                    seekToPosition(finalProgress);
-                });
-            }
-        }
-    };
-    
-    canvas.addEventListener('mousedown', mouseDownHandler);
-    document.addEventListener('mousemove', mouseMoveHandler);
-    document.addEventListener('mouseup', mouseUpHandler);
-    canvas.addEventListener('touchstart', touchStartHandler);
-    document.addEventListener('touchmove', touchMoveHandler);
-    document.addEventListener('touchend', touchEndHandler);
-    
+    });
+    document.addEventListener('touchend', handleDragEnd);
     dragHandlersAttached = true;
 }
 
 function handleWaveformClick(e) {
-    if (!audioBuffer || !waveCanvas) return;
-    
+    if (!(audioBuffer || mediaElement) || !waveCanvas) return;
     const rect = waveCanvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return; // Safety check
-    
-    const canvasX = e.clientX - rect.left;
-    // Clamp to canvas bounds
-    const clampedX = Math.max(0, Math.min(canvasX, rect.width));
-    
-    // Calculate progress based on displayed width (not internal canvas width)
-    // This is more reliable when canvas is resized
-    const progress = Math.max(0, Math.min(1, clampedX / rect.width));
-    
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const progress = Math.max(0, Math.min(1, (Math.max(0, Math.min(e.clientX - rect.left, rect.width)) / rect.width)));
     if (isDragging) {
-        // During drag, just store the progress - don't seek yet
         dragProgress = progress;
     } else {
-        // On click (not drag), seek immediately
         dragProgress = null;
+        // Always seek, whether paused or playing
         seekToPosition(progress);
     }
 }
 
 function drawFrequencyVisualizers() {
-    if (!analyser || !dataArray) {
-        // Clear both canvases if no audio
-        if (freqLeftCtx && freqLeftCanvas) {
-            freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
-        }
-        if (freqRightCtx && freqRightCanvas) {
-            freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
-        }
+    if (leftAnalyser && rightAnalyser && dataArrayLeft && dataArrayRight) {
+        leftAnalyser.getByteFrequencyData(dataArrayLeft);
+        rightAnalyser.getByteFrequencyData(dataArrayRight);
+        if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArrayLeft, 0, dataArrayLeft.length);
+        if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArrayRight, 0, dataArrayRight.length);
         return;
     }
-    
-    // Get frequency data
-    analyser.getByteFrequencyData(dataArray);
-    
-    // Draw left frequency visualizer (use first half of frequency data)
-    if (freqLeftCtx && freqLeftCanvas) {
-        drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArray, 0, Math.floor(dataArray.length / 2));
+    if (analyser && dataArray) {
+        analyser.getByteFrequencyData(dataArray);
+        const mid = Math.floor(dataArray.length / 2);
+        if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArray, 0, mid);
+        if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArray, mid, dataArray.length);
+        return;
     }
-    
-    // Draw right frequency visualizer (use second half of frequency data)
-    if (freqRightCtx && freqRightCanvas) {
-        drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArray, Math.floor(dataArray.length / 2), dataArray.length);
+    if (freqLeftCtx && freqLeftCanvas) freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
+    if (freqRightCtx && freqRightCanvas) freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
+}
+
+function drawFrequencyBars(ctx, canvas, arr, startIndex, endIndex) {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const count = Math.max(1, endIndex - startIndex);
+    const barWidth = w / count;
+    for (let i = startIndex, x = 0; i < endIndex; i++, x += barWidth) {
+        const v = arr[i] / 255;
+        const barHeight = v * h;
+        const y = h - barHeight;
+        const g = ctx.createLinearGradient(0, h, 0, 0);
+        g.addColorStop(0, 'rgb(0, 100, 255)');
+        g.addColorStop(1, 'rgb(255, 0, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, Math.max(1, barWidth - 0.5), barHeight);
     }
 }
 
-function drawFrequencyBars(ctx, canvas, dataArray, startIndex, endIndex) {
-    const w = canvas.width;
-    const h = canvas.height;
-    const barCount = 32; // Number of frequency bars
-    const barWidth = w / barCount;
-    const dataLength = endIndex - startIndex;
-    const binSize = Math.floor(dataLength / barCount);
-    
-    ctx.clearRect(0, 0, w, h);
-    
-    for (let i = 0; i < barCount; i++) {
-        // Calculate average frequency for this bar
-        let sum = 0;
-        const binStart = startIndex + (i * binSize);
-        const binEnd = Math.min(binStart + binSize, endIndex);
-        
-        for (let j = binStart; j < binEnd; j++) {
-            sum += dataArray[j];
-        }
-        
-        const avg = sum / (binEnd - binStart);
-        const normalized = avg / 255; // 0-1 range
-        
-        // Calculate bar height (from bottom, going up)
-        const barHeight = normalized * h * 0.9; // Use 90% of height
-        const x = i * barWidth;
-        const y = h - barHeight; // Start from bottom
-        
-        // Color gradient from green (low) to red (high)
-        const r = Math.min(255, normalized * 255 * 2);
-        const g = Math.min(255, (1 - normalized) * 255 * 2);
-        const b = 0;
-        
-        ctx.fillStyle = `rgb(${Math.floor(r)}, ${Math.floor(g)}, ${Math.floor(b)})`;
-        ctx.fillRect(x, y, barWidth - 1, barHeight);
-    }
-}
 
 function toggleMenu() {
     document.getElementById('controls').classList.toggle('collapsed');
+}
+
+init();
+animate();
+function buildCustomShapeSelect(nativeSelect) {
+    try {
+        if (!nativeSelect || nativeSelect.dataset.customized === '1') return;
+        nativeSelect.dataset.customized = '1';
+        nativeSelect.classList.add('visually-hidden-select');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'custom-select';
+        const selected = document.createElement('div');
+        selected.className = 'selected';
+        selected.textContent = 'SHAPE';
+        const opts = document.createElement('ul');
+        opts.className = 'options';
+        for (let i = 0; i < nativeSelect.options.length; i++) {
+            const o = nativeSelect.options[i];
+            const li = document.createElement('li');
+            li.className = 'option' + (o.selected ? ' active' : '');
+            li.textContent = o.text;
+            li.dataset.value = o.value;
+            li.onclick = (e) => {
+                e.stopPropagation();
+                nativeSelect.value = o.value;
+                selected.textContent = 'SHAPE';
+                [...opts.children].forEach(c => c.classList.remove('active'));
+                li.classList.add('active');
+                wrapper.classList.remove('open');
+                const evt = new Event('change', { bubbles: true });
+                nativeSelect.dispatchEvent(evt);
+            };
+            opts.appendChild(li);
+        }
+        selected.onclick = (e) => {
+            e.stopPropagation();
+            const controls = document.getElementById('controls');
+            const willOpen = !wrapper.classList.contains('open');
+            wrapper.classList.toggle('open');
+            if (controls) controls.classList.toggle('showing-select', willOpen);
+        };
+        document.addEventListener('click', () => {
+            if (wrapper.classList.contains('open')) {
+                wrapper.classList.remove('open');
+                const controls = document.getElementById('controls');
+                if (controls) controls.classList.remove('showing-select');
+            }
+        });
+        wrapper.appendChild(selected);
+        wrapper.appendChild(opts);
+        nativeSelect.parentNode.insertBefore(wrapper, nativeSelect.nextSibling);
+    } catch(_) {}
 }
