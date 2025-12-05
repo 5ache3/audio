@@ -12,8 +12,9 @@ let isDragging = false, isPaused = false, pauseTime = 0, dragProgress = null;
 let micWaveformHistory = [], micStartTime, lastSeekTime = 0, dragHandlersAttached = false;
 let sound_mode = 'mic', waveCanvas, waveCtx, freqLeftCanvas, freqLeftCtx, freqRightCanvas, freqRightCtx;
 let mediaElement, mediaSource;
+let showWaveLine = true;
 
-const PARTICLE_COUNT_PER_GROUP = 1000, TOTAL_GROUPS = 8, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
+const PARTICLE_COUNT_PER_GROUP = 1000, TOTAL_GROUPS = 10, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
 const COLORS = [0xff0044, 0xff4400, 0xffcc00, 0x88ff00, 0x00ff88, 0x00d4ff, 0x0066ff, 0x4400ff, 0x8800ff, 0xff00cc];
 
 function init() {
@@ -45,7 +46,14 @@ function init() {
     const btn = document.getElementById('playPauseBtn');
     if (btn) btn.onclick = togglePlayPause;
     const shapeSel = document.getElementById('shapeSelect');
-    if (shapeSel) shapeSel.onchange = () => { const v = document.getElementById('shapeSelect').value; createParticles(v); };
+    if (shapeSel) {
+        shapeSel.onchange = () => { const v = document.getElementById('shapeSelect').value; createParticles(v); };
+        buildCustomShapeSelect(shapeSel);
+    }
+    const hideBtn = document.getElementById('hideDashboardBtn');
+    if (hideBtn) hideBtn.onclick = toggleMenu;
+    const hideLineBtn = document.getElementById('hideLineBtn');
+    if (hideLineBtn) hideLineBtn.onclick = () => { showWaveLine = !showWaveLine; hideLineBtn.textContent = showWaveLine ? 'Hide Line' : 'Show Line'; };
     window.addEventListener('resize', onWindowResize);
     window.toggleMenu = toggleMenu;
     setupWaveformDragHandlers();
@@ -337,8 +345,15 @@ function stopAudioSource() {
 }
 
 function uploadAndPlay() {
-    const file = document.getElementById('audioFile').files[0];
-    if (!file) return alert('Please select a file');
+    const input = document.getElementById('audioFile');
+    if (!input) return;
+    const file = input.files && input.files[0];
+    if (!file) {
+        const handler = () => { uploadAndPlay(); };
+        input.addEventListener('change', handler, { once: true });
+        try { input.click(); } catch(e) {}
+        return;
+    }
     sound_mode = 'up';
     setupAudioFromFile(file);
 }
@@ -659,6 +674,30 @@ function drawWaveform() {
     if (w <= 0 || h <= 0) return;
     ctx.clearRect(0, 0, w, h);
 
+    if (!showWaveLine) {
+        waveCanvas.style.cursor = 'default';
+        if (sound_mode === 'up' && audioBuffer) {
+            const duration = audioBuffer.duration || 0;
+            let currentTime = playbackOffset;
+            if (!isPaused && playbackStartTime !== null && audioCtx) {
+                const elapsed = audioCtx.currentTime - playbackStartTime;
+                currentTime = Math.min(Math.max(playbackOffset + elapsed, 0), duration);
+            }
+            updateTimer(currentTime, duration);
+            updatePlayPauseButton();
+        } else if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+            const ct = mediaElement && isFinite(mediaElement.currentTime) ? mediaElement.currentTime : 0;
+            const dur = mediaElement && isFinite(mediaElement.duration) ? mediaElement.duration : 0;
+            updateTimer(ct, dur);
+            updatePlayPauseButton();
+        } else if (sound_mode === 'mic') {
+            const timerEl = document.getElementById('audioTimer');
+            if (timerEl) timerEl.textContent = '';
+            updatePlayPauseButton();
+        }
+        return;
+    }
+
     if (sound_mode === 'up' && waveformData && audioBuffer) {
         waveCanvas.style.cursor = 'pointer';
         drawFileWaveform(ctx, w, h);
@@ -703,7 +742,10 @@ function drawFileWaveform(ctx, w, h) {
     const progressX = w * progress, progressIndex = Math.floor(progress * waveformData.length);
     const pointWidth = w / waveformData.length, centerY = h / 2, amplitudeMultiplier = 1.2;
     
-    ctx.strokeStyle = "#0066ff"; ctx.globalAlpha = 0.3; ctx.lineWidth = 4;
+    const gradFuture = ctx.createLinearGradient(0, 0, w, 0);
+    gradFuture.addColorStop(0, "rgba(0, 102, 255, 0.25)");
+    gradFuture.addColorStop(1, "rgba(0, 212, 255, 0.15)");
+    ctx.strokeStyle = gradFuture; ctx.globalAlpha = 1.0; ctx.lineWidth = 6;
     ctx.beginPath();
     for (let i = progressIndex; i < waveformData.length; i++) {
         const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
@@ -712,7 +754,18 @@ function drawFileWaveform(ctx, w, h) {
     }
     ctx.stroke();
     
-    ctx.strokeStyle = "#00d4ff"; ctx.globalAlpha = 0.9; ctx.lineWidth = 5;
+    const gradPast = ctx.createLinearGradient(0, 0, w, 0);
+    gradPast.addColorStop(0, "#00bfff");
+    gradPast.addColorStop(1, "#00d4ff");
+    ctx.strokeStyle = gradPast; ctx.globalAlpha = 0.35; ctx.lineWidth = 10;
+    ctx.beginPath();
+    for (let i = 0; i <= progressIndex; i++) {
+        const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
+        const y = centerY - amplitude;
+        (i === 0) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = gradPast; ctx.globalAlpha = 0.95; ctx.lineWidth = 5;
     ctx.beginPath();
     for (let i = 0; i <= progressIndex; i++) {
         const x = i * pointWidth, amplitude = waveformData[i].avg * h * amplitudeMultiplier;
@@ -721,17 +774,28 @@ function drawFileWaveform(ctx, w, h) {
     }
     ctx.stroke();
     
-    const lineHeight = h * 0.6, lineTop = (h - lineHeight) / 2;
-    ctx.strokeStyle = "#ffffff"; ctx.globalAlpha = 0.8; ctx.lineWidth = 2;
+    const barWidth = Math.max(3, Math.floor(w * 0.003));
+    const indexClamped = Math.max(0, Math.min(progressIndex, waveformData.length - 1));
+    const energy = waveformData[indexClamped].peak;
+    const baseLen = Math.min(90, Math.max(40, h * 0.25));
+    const shortLen = Math.min(Math.max(baseLen + energy * 40, 30), Math.max(50, h * 0.35));
+    const yStart = centerY - shortLen / 2;
+    const yEnd = centerY + shortLen / 2;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 212, 255, 0.6)';
+    ctx.shadowBlur = 12;
+    const lineGrad = ctx.createLinearGradient(progressX, yStart, progressX, yEnd);
+    lineGrad.addColorStop(0, '#00bfff');
+    lineGrad.addColorStop(1, '#00d4ff');
+    ctx.strokeStyle = lineGrad;
+    ctx.lineWidth = barWidth;
+    ctx.globalAlpha = 1.0;
     ctx.beginPath();
-    ctx.moveTo(progressX, lineTop);
-    ctx.lineTo(progressX, lineTop + lineHeight);
+    ctx.moveTo(progressX, yStart);
+    ctx.lineTo(progressX, yEnd);
     ctx.stroke();
-    
-    ctx.fillStyle = "#ffffff"; ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(progressX, lineTop, 4, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.restore();
     
     updateTimer(currentTime, duration);
 }
@@ -836,24 +900,24 @@ function handleWaveformClick(e) {
     }
 }
 
-// function drawFrequencyVisualizers() {
-//     if (leftAnalyser && rightAnalyser && dataArrayLeft && dataArrayRight) {
-//         leftAnalyser.getByteFrequencyData(dataArrayLeft);
-//         rightAnalyser.getByteFrequencyData(dataArrayRight);
-//         if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArrayLeft, 0, dataArrayLeft.length);
-//         if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArrayRight, 0, dataArrayRight.length);
-//         return;
-//     }
-//     if (analyser && dataArray) {
-//         analyser.getByteFrequencyData(dataArray);
-//         const mid = Math.floor(dataArray.length / 2);
-//         if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArray, 0, mid);
-//         if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArray, mid, dataArray.length);
-//         return;
-//     }
-//     if (freqLeftCtx && freqLeftCanvas) freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
-//     if (freqRightCtx && freqRightCanvas) freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
-// }
+function drawFrequencyVisualizers() {
+    if (leftAnalyser && rightAnalyser && dataArrayLeft && dataArrayRight) {
+        leftAnalyser.getByteFrequencyData(dataArrayLeft);
+        rightAnalyser.getByteFrequencyData(dataArrayRight);
+        if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArrayLeft, 0, dataArrayLeft.length);
+        if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArrayRight, 0, dataArrayRight.length);
+        return;
+    }
+    if (analyser && dataArray) {
+        analyser.getByteFrequencyData(dataArray);
+        const mid = Math.floor(dataArray.length / 2);
+        if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArray, 0, mid);
+        if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArray, mid, dataArray.length);
+        return;
+    }
+    if (freqLeftCtx && freqLeftCanvas) freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
+    if (freqRightCtx && freqRightCanvas) freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
+}
 
 function drawFrequencyBars(ctx, canvas, arr, startIndex, endIndex) {
     const w = canvas.width, h = canvas.height;
@@ -879,3 +943,52 @@ function toggleMenu() {
 
 init();
 animate();
+function buildCustomShapeSelect(nativeSelect) {
+    try {
+        if (!nativeSelect || nativeSelect.dataset.customized === '1') return;
+        nativeSelect.dataset.customized = '1';
+        nativeSelect.classList.add('visually-hidden-select');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'custom-select';
+        const selected = document.createElement('div');
+        selected.className = 'selected';
+        selected.textContent = 'SHAPE';
+        const opts = document.createElement('ul');
+        opts.className = 'options';
+        for (let i = 0; i < nativeSelect.options.length; i++) {
+            const o = nativeSelect.options[i];
+            const li = document.createElement('li');
+            li.className = 'option' + (o.selected ? ' active' : '');
+            li.textContent = o.text;
+            li.dataset.value = o.value;
+            li.onclick = (e) => {
+                e.stopPropagation();
+                nativeSelect.value = o.value;
+                selected.textContent = 'SHAPE';
+                [...opts.children].forEach(c => c.classList.remove('active'));
+                li.classList.add('active');
+                wrapper.classList.remove('open');
+                const evt = new Event('change', { bubbles: true });
+                nativeSelect.dispatchEvent(evt);
+            };
+            opts.appendChild(li);
+        }
+        selected.onclick = (e) => {
+            e.stopPropagation();
+            const controls = document.getElementById('controls');
+            const willOpen = !wrapper.classList.contains('open');
+            wrapper.classList.toggle('open');
+            if (controls) controls.classList.toggle('showing-select', willOpen);
+        };
+        document.addEventListener('click', () => {
+            if (wrapper.classList.contains('open')) {
+                wrapper.classList.remove('open');
+                const controls = document.getElementById('controls');
+                if (controls) controls.classList.remove('showing-select');
+            }
+        });
+        wrapper.appendChild(selected);
+        wrapper.appendChild(opts);
+        nativeSelect.parentNode.insertBefore(wrapper, nativeSelect.nextSibling);
+    } catch(_) {}
+}
