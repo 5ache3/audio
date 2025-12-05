@@ -3,14 +3,17 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-let scene, camera, renderer, composer, analyser, audioCtx, dataArray;
+let scene, camera, renderer, composer, analyser, audioCtx, dataArray, leftAnalyser, rightAnalyser, dataArrayLeft, dataArrayRight, splitterNode;
+let ambientLight;
 let particles = [], time = 0, smoothedAudio = new Array(10).fill(0);
+let currentShape = 'sphere';
 let audioSource, audioBuffer, waveformData, playbackStartTime, playbackOffset = 0;
 let isDragging = false, isPaused = false, pauseTime = 0, dragProgress = null;
 let micWaveformHistory = [], micStartTime, lastSeekTime = 0, dragHandlersAttached = false;
 let sound_mode = 'mic', waveCanvas, waveCtx, freqLeftCanvas, freqLeftCtx, freqRightCanvas, freqRightCtx;
+let mediaElement, mediaSource;
 
-const PARTICLE_COUNT_PER_SPHERE = 2000, TOTAL_SPHERES = 10, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
+const PARTICLE_COUNT_PER_GROUP = 1000, TOTAL_GROUPS = 8, MAX_MIC_HISTORY = 1000, SEEK_THROTTLE_MS = 50;
 const COLORS = [0xff0044, 0xff4400, 0xffcc00, 0x88ff00, 0x00ff88, 0x00d4ff, 0x0066ff, 0x4400ff, 0x8800ff, 0xff00cc];
 
 function init() {
@@ -29,9 +32,11 @@ function init() {
     composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
     composer.addPass(bloomPass);
+    window.bloomPass = bloomPass;
 
-    createSpheres();
-    scene.add(new THREE.AmbientLight(0x444444));
+    createParticles(currentShape);
+    ambientLight = new THREE.AmbientLight(0x444444);
+    scene.add(ambientLight);
     
     initCanvases();
     useMicrophone();
@@ -39,6 +44,8 @@ function init() {
     document.getElementById('micBtn').onclick = useMicrophone;
     const btn = document.getElementById('playPauseBtn');
     if (btn) btn.onclick = togglePlayPause;
+    const shapeSel = document.getElementById('shapeSelect');
+    if (shapeSel) shapeSel.onchange = () => { const v = document.getElementById('shapeSelect').value; createParticles(v); };
     window.addEventListener('resize', onWindowResize);
     window.toggleMenu = toggleMenu;
     setupWaveformDragHandlers();
@@ -53,40 +60,175 @@ function initCanvases() {
     if (freqRightCanvas) { freqRightCtx = freqRightCanvas.getContext("2d"); resizeFreqCanvas(freqRightCanvas); }
 }
 
-function createSpheres() {
-    for(let s = 0; s < TOTAL_SPHERES; s++) {
-        const geometry = new THREE.BufferGeometry();
-        const posArray = new Float32Array(PARTICLE_COUNT_PER_SPHERE * 3);
-        const originalPos = new Float32Array(PARTICLE_COUNT_PER_SPHERE * 3);
-        const randoms = new Float32Array(PARTICLE_COUNT_PER_SPHERE);
-        const baseRadius = 2.0 + (s * 0.3);
+function clearParticles() {
+    particles.forEach(p => scene.remove(p));
+    particles = [];
+}
 
-        for(let i = 0; i < PARTICLE_COUNT_PER_SPHERE; i++) {
+function createParticles(shape) {
+    clearParticles();
+    currentShape = shape;
+    switch(shape) {
+        case 'octahedron':
+            createTetrahedronParticles();
+            break;
+        case 'cylinder':
+            createCylinderParticles();
+            break;
+        case 'torus':
+            createTorusParticles();
+            break;
+        case 'spiral':
+            createSpiralParticles();
+            break;
+        case 'sphere':
+        default:
+            createSphereParticles();
+    }
+}
+
+function createSphereParticles() {
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const baseRadius = 2.0 + (s * 0.3);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
             const theta = Math.random() * Math.PI * 2;
             const phi = Math.acos((Math.random() * 2) - 1);
             const x = baseRadius * Math.sin(phi) * Math.cos(theta);
             const y = baseRadius * Math.sin(phi) * Math.sin(theta);
             const z = baseRadius * Math.cos(phi);
-            posArray[i*3] = originalPos[i*3] = x;
-            posArray[i*3+1] = originalPos[i*3+1] = y;
-            posArray[i*3+2] = originalPos[i*3+2] = z;
+            posArray[i*3] = x;
+            posArray[i*3+1] = y;
+            posArray[i*3+2] = z;
+            originalPos[i*3] = x;
+            originalPos[i*3+1] = y;
+            originalPos[i*3+2] = z;
             randoms[i] = Math.random();
         }
-
         geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        const points = new THREE.Points(geometry, new THREE.PointsMaterial({
-            color: COLORS[s], size: 0.05, transparent: true, opacity: 0.6,
-            blending: THREE.AdditiveBlending, depthWrite: false
-        }));
-        
-        points.userData = {
-            originalPos, randoms, radius: baseRadius, layerIndex: s,
-            rotationSpeed: {
-                x: (Math.random() - 0.5) * 0.01,
-                y: (Math.random() - 0.5) * 0.01,
-                z: (Math.random() - 0.5) * 0.01
-            }
-        };
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.05, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: baseRadius, type: 'sphere', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createTetrahedronParticles() {
+    const radius = 2.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupScale = 1.0 + (s * 0.15);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            let x = (Math.random() * 2 - 1) * radius;
+            let y = (Math.random() * 2 - 1) * radius;
+            let z = (Math.random() * 2 - 1) * radius;
+            let length = Math.sqrt(x*x + y*y + z*z);
+            x /= length; y /= length; z /= length;
+            const projFactor = radius / (Math.abs(x) + Math.abs(y) + Math.abs(z));
+            x *= projFactor * groupScale * 0.8;
+            y *= projFactor * groupScale * 0.8;
+            z *= projFactor * groupScale * 0.8;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.03, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius, type: 'octahedron', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createCylinderParticles() {
+    const cylinderHeight = 8;
+    const cylinderRadius = 0.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupRadius = cylinderRadius + (s * 0.1);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const h = Math.random();
+            const theta = Math.random() * Math.PI * 2;
+            const r = groupRadius + (Math.random() - 0.5) * 0.2;
+            const x = r * Math.cos(theta);
+            const z = r * Math.sin(theta);
+            const y = (h - 0.5) * cylinderHeight;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.04, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: groupRadius, type: 'cylinder', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createTorusParticles() {
+    const tubeRadius = 1.5;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const innerRadius = 2.5 + (s * 0.3);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const u = Math.random() * Math.PI * 2;
+            const v = Math.random() * Math.PI * 2;
+            const x = (innerRadius + tubeRadius * Math.cos(v)) * Math.cos(u);
+            const y = tubeRadius * Math.sin(v);
+            const z = (innerRadius + tubeRadius * Math.cos(v)) * Math.sin(u);
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.04, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: innerRadius, type: 'torus', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
+        scene.add(points);
+        particles.push(points);
+    }
+}
+
+function createSpiralParticles() {
+    const spiralHeight = 10;
+    const spiralRadius = 1.5;
+    const turns = 1.2;
+    for(let s = 0; s < TOTAL_GROUPS; s++) {
+        const geometry = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const originalPos = new Float32Array(PARTICLE_COUNT_PER_GROUP * 3);
+        const randoms = new Float32Array(PARTICLE_COUNT_PER_GROUP);
+        const groupRadius = spiralRadius + (s * 0.1);
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
+            const t = i / PARTICLE_COUNT_PER_GROUP;
+            const theta = t * Math.PI * 2 * turns;
+            const r = groupRadius + (Math.random() - 0.5) * 0.1;
+            const x = r * Math.cos(theta);
+            const z = r * Math.sin(theta);
+            const y = (t - 0.5) * spiralHeight;
+            posArray[i*3] = x; posArray[i*3+1] = y; posArray[i*3+2] = z;
+            originalPos[i*3] = x; originalPos[i*3+1] = y; originalPos[i*3+2] = z;
+            randoms[i] = Math.random();
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        const material = new THREE.PointsMaterial({ color: COLORS[s], size: 0.03, transparent: true, opacity: 0.4, blending: THREE.AdditiveBlending, depthWrite: false });
+        const points = new THREE.Points(geometry, material);
+        points.userData = { originalPos, randoms, radius: groupRadius, type: 'spiral', rotationSpeed: { x: (Math.random() - 0.5) * 0.01, y: (Math.random() - 0.5) * 0.01, z: (Math.random() - 0.5) * 0.01 } };
         scene.add(points);
         particles.push(points);
     }
@@ -107,35 +249,79 @@ function animate() {
         }
     }
 
-    for(let i=0; i<10; i++) smoothedAudio[i] += (bands[i] - smoothedAudio[i]) * 0.45;
+    for(let i=0; i<10; i++) smoothedAudio[i] += (bands[i] - smoothedAudio[i]) * 0.15;
+    const bassIntensity = smoothedAudio[0];
+    const trebleIntensity = smoothedAudio[9];
+    const emotionFactor = bassIntensity * 0.5 + trebleIntensity * 0.5;
+    const densityRaw = (smoothedAudio[0] * 5 + smoothedAudio[1] + smoothedAudio[2] + smoothedAudio[3] + smoothedAudio[4]) / 6;
+    const densityFactor = densityRaw * 0.6 + 0.4;
+    if (ambientLight) ambientLight.intensity = 0.01 + densityFactor * 0.03;
+    if (window.bloomPass) window.bloomPass.strength = 2.0 + densityFactor * 1.5;
 
     particles.forEach((p, idx) => {
         const positions = p.geometry.attributes.position.array;
         const originals = p.userData.originalPos;
         const rand = p.userData.randoms;
+        const particleType = p.userData.type;
         const intensity = smoothedAudio[idx];
         
-        p.rotation.x += p.userData.rotationSpeed.x + (intensity * 0.02);
-        p.rotation.y += p.userData.rotationSpeed.y + (intensity * 0.02);
+        p.rotation.x += p.userData.rotationSpeed.x + (densityFactor * 0.02);
+        p.rotation.y += p.userData.rotationSpeed.y + (densityFactor * 0.03);
 
-        for(let i = 0; i < PARTICLE_COUNT_PER_SPHERE; i++) {
+        for(let i = 0; i < PARTICLE_COUNT_PER_GROUP; i++) {
             const ix = i * 3;
-            const ox = originals[ix], oy = originals[ix+1], oz = originals[ix+2];
-            const vibration = Math.sin(time * 5 + ox + intensity * 10) * 0.1;
-            const noise = Math.cos(time * 3 + oy * 2) * Math.sin(time * 2 + oz * 2) * 0.3;
-            const scale = 1 + (intensity * (0.8 + rand[i] * 0.5)) + vibration + noise;
-            positions[ix] = ox * scale;
-            positions[ix+1] = oy * scale;
-            positions[ix+2] = oz * scale;
+            const ox = originals[ix];
+            const oy = originals[ix+1];
+            const oz = originals[ix+2];
+            const vibration = Math.sin(time * 8 + ox * 2 + intensity * 15) * 0.10;
+            const noise = Math.cos(time * 5 + oy * 3) * Math.sin(time * 4 + oz * 3) * 0.4;
+            const explosion = 1 + (intensity * (1.5 + rand[i] * 0.5));
+            let finalMagnitude;
+            const magnitude = Math.sqrt(ox*ox + oy*oy + oz*oz);
+            const dirX = ox / magnitude;
+            const dirY = oy / magnitude;
+            const dirZ = oz / magnitude;
+            switch (particleType) {
+                case 'sphere':
+                    finalMagnitude = magnitude * explosion + vibration + noise;
+                    positions[ix]   = dirX * finalMagnitude;
+                    positions[ix+1] = dirY * finalMagnitude;
+                    positions[ix+2] = dirZ * finalMagnitude;
+                    break;
+                case 'octahedron':
+                    positions[ix]   = ox * (1 + intensity * 1.5) + vibration;
+                    positions[ix+1] = oy * (1 + intensity * 1.5) + vibration;
+                    positions[ix+2] = oz * (1 + intensity * 1.5) + vibration;
+                    break;
+                case 'cylinder':
+                    positions[ix]   = ox * explosion;
+                    positions[ix+1] = oy + intensity * 1.5 * Math.sin(time * 5 + rand[i] * 5);
+                    positions[ix+2] = oz * explosion;
+                    break;
+                case 'torus':
+                    finalMagnitude = magnitude * (1 + intensity * 0.5);
+                    positions[ix]   = dirX * finalMagnitude;
+                    positions[ix+1] = dirY * finalMagnitude * explosion;
+                    positions[ix+2] = dirZ * finalMagnitude;
+                    break;
+                case 'spiral':
+                    positions[ix]   = ox * explosion;
+                    positions[ix+1] = oy + intensity * 2.0 * Math.sin(time * 8 + rand[i] * 5);
+                    positions[ix+2] = oz * explosion;
+                    break;
+            }
         }
-        
         p.geometry.attributes.position.needsUpdate = true;
-        p.material.size = 0.04 + (intensity * 0.08);
-        p.material.opacity = 0.3 + (intensity * 0.7);
+        p.material.size = 0.04 + (intensity * 0.15);
+        p.material.opacity = 0.2 + (intensity * 0.8);
     });
 
-    camera.position.x = Math.sin(time * 0.5) * 12;
-    camera.position.z = Math.cos(time * 0.5) * 12;
+    const cameraDistance = 12 - (emotionFactor * 3);
+    camera.position.x = Math.sin(time * 0.5 * densityFactor) * cameraDistance;
+    camera.position.z = Math.cos(time * 0.5 * densityFactor) * cameraDistance;
+    const shake = bassIntensity * 2;
+    camera.position.y = Math.sin(time * 15) * shake * 0.1;
+    camera.position.z += Math.cos(time * 7) * shake * 0.1;
     camera.lookAt(0,0,0);
     composer.render();
     drawWaveform();
@@ -154,7 +340,7 @@ function uploadAndPlay() {
     const file = document.getElementById('audioFile').files[0];
     if (!file) return alert('Please select a file');
     sound_mode = 'up';
-    setupAudio(URL.createObjectURL(file));
+    setupAudioFromFile(file);
 }
 
 function useMicrophone() {
@@ -186,6 +372,73 @@ function setupAudio(url) {
         });
 }
 
+async function setupAudioFromFile(file) {
+    if (!audioCtx || audioCtx.state === 'closed') {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    try { await audioCtx.resume(); } catch(e) {}
+    waveformData = null;
+    audioBuffer = null;
+    audioSource = null;
+    playbackStartTime = null;
+    playbackOffset = 0;
+    micWaveformHistory = [];
+    isPaused = false;
+    pauseTime = 0;
+    if (mediaElement) {
+        try { mediaElement.pause(); } catch(e) {}
+        try { mediaElement.src = ''; } catch(e) {}
+        mediaElement = null;
+    }
+    if (mediaSource) {
+        try { mediaSource.disconnect(); } catch(e) {}
+        mediaSource = null;
+    }
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const decoded = await decodeArrayBuffer(arrayBuffer);
+        audioBuffer = decoded;
+        generateWaveformData(decoded);
+        isPaused = false;
+        pauseTime = 0;
+        playbackOffset = 0;
+        updatePlayPauseButton();
+        startPlayback(0);
+    } catch(err) {
+        const url = URL.createObjectURL(file);
+        if (!audioCtx || audioCtx.state === 'closed') {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        try { await audioCtx.resume(); } catch(e) {}
+        const el = new Audio();
+        el.src = url;
+        el.crossOrigin = 'anonymous';
+        el.preload = 'auto';
+        el.loop = false;
+        mediaElement = el;
+        const source = audioCtx.createMediaElementSource(el);
+        mediaSource = source;
+        connectAnalyser(source);
+        try { await el.play(); } catch(e) {}
+        updatePlayPauseButton();
+        el.onended = () => {
+            try { el.pause(); } catch(e) {}
+            try { el.currentTime = 0; } catch(e) {}
+            updatePlayPauseButton();
+        };
+    }
+}
+
+function decodeArrayBuffer(buffer) {
+    return new Promise((resolve, reject) => {
+        try {
+            audioCtx.decodeAudioData(buffer, resolve, reject);
+        } catch(e) {
+            audioCtx.decodeAudioData(buffer).then(resolve).catch(reject);
+        }
+    });
+}
+
 function startPlayback(offset) {
     if (!audioBuffer || !audioCtx || audioCtx.state === 'closed') return;
     if (audioCtx.state === 'suspended') audioCtx.resume().catch(e => console.error('Failed to resume:', e));
@@ -210,10 +463,10 @@ function startPlayback(offset) {
         updatePlayPauseButton();
         
         source.onended = () => {
-            playbackStartTime = null;
+            if (source !== audioSource) return;
             playbackOffset = 0;
-            isPaused = false;
-            pauseTime = 0;
+            playbackStartTime = null;
+            isPaused = true;
             audioSource = null;
             updatePlayPauseButton();
         };
@@ -226,7 +479,14 @@ function startPlayback(offset) {
 }
 
 function togglePlayPause() {
-    if (!audioBuffer || sound_mode !== 'up' || !audioCtx) return;
+    if (sound_mode !== 'up' || !audioCtx) return;
+    if (mediaElement && !audioBuffer) {
+        if (mediaElement.paused) { try { mediaElement.play(); } catch(e) {} }
+        else { try { mediaElement.pause(); } catch(e) {} }
+        updatePlayPauseButton();
+        return;
+    }
+    if (!audioBuffer) return;
     
     if (isPaused) {
         // Resume: start playback from saved offset (don't recalculate)
@@ -256,15 +516,25 @@ function togglePlayPause() {
 function updatePlayPauseButton() {
     const btn = document.getElementById('playPauseBtn');
     if (!btn) return;
-    if (sound_mode === 'up' && audioBuffer) {
+    if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
         btn.style.display = 'flex';
-        btn.textContent = (isPaused || !audioSource) ? '▶' : '⏸';
+        if (audioBuffer) {
+            btn.textContent = (isPaused || !audioSource) ? '▶' : '⏸';
+        } else if (mediaElement) {
+            btn.textContent = mediaElement.paused ? '▶' : '⏸';
+        }
     } else {
         btn.style.display = 'none';
     }
 }
 
 function seekToPosition(progress) {
+    if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+        if (!mediaElement || !isFinite(mediaElement.duration) || mediaElement.duration <= 0) return;
+        const seekTimeEl = Math.max(0, Math.min(progress * mediaElement.duration, mediaElement.duration));
+        try { mediaElement.currentTime = seekTimeEl; } catch(e) {}
+        return;
+    }
     if (!audioBuffer || !audioCtx || audioCtx.state === 'closed') return;
     if (audioCtx.state === 'suspended') audioCtx.resume().catch(e => console.error('Failed to resume:', e));
     
@@ -275,6 +545,7 @@ function seekToPosition(progress) {
     
     // If paused, just update the offset without starting playback
     if (isPaused) {
+        playbackStartTime = null;
         return;
     }
     
@@ -297,6 +568,9 @@ function setupAudioStream(stream) {
 function connectAnalyser(source) {
     if (!source || !audioCtx) return;
     if (analyser) { try { analyser.disconnect(); } catch(e) {} }
+    if (leftAnalyser) { try { leftAnalyser.disconnect(); } catch(e) {} leftAnalyser = null; }
+    if (rightAnalyser) { try { rightAnalyser.disconnect(); } catch(e) {} rightAnalyser = null; }
+    if (splitterNode) { try { splitterNode.disconnect(); } catch(e) {} splitterNode = null; }
     
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
@@ -308,6 +582,27 @@ function connectAnalyser(source) {
         if (sound_mode !== 'mic') analyser.connect(audioCtx.destination);
     } catch(e) {
         console.error('Failed to connect analyser:', e);
+    }
+    
+    if (sound_mode !== 'mic') {
+        try {
+            splitterNode = audioCtx.createChannelSplitter(2);
+            source.connect(splitterNode);
+            leftAnalyser = audioCtx.createAnalyser();
+            rightAnalyser = audioCtx.createAnalyser();
+            leftAnalyser.fftSize = 512;
+            rightAnalyser.fftSize = 512;
+            leftAnalyser.smoothingTimeConstant = 0.8;
+            rightAnalyser.smoothingTimeConstant = 0.8;
+            dataArrayLeft = new Uint8Array(leftAnalyser.frequencyBinCount);
+            dataArrayRight = new Uint8Array(rightAnalyser.frequencyBinCount);
+            splitterNode.connect(leftAnalyser, 0);
+            splitterNode.connect(rightAnalyser, 1);
+        } catch(e) {
+        }
+    } else {
+        dataArrayLeft = null;
+        dataArrayRight = null;
     }
 }
 
@@ -359,12 +654,6 @@ function generateWaveformData(buffer) {
 function drawWaveform() {
     if (!waveCanvas) return;
     if (!waveCtx) { waveCtx = waveCanvas.getContext("2d"); if (!waveCtx) return; }
-    if (!analyser || !dataArray) {
-        const timerEl = document.getElementById('audioTimer');
-        if (timerEl) timerEl.textContent = '';
-        waveCanvas.style.cursor = 'default';
-        return;
-    }
 
     const ctx = waveCtx, w = waveCanvas.width, h = waveCanvas.height;
     if (w <= 0 || h <= 0) return;
@@ -373,9 +662,16 @@ function drawWaveform() {
     if (sound_mode === 'up' && waveformData && audioBuffer) {
         waveCanvas.style.cursor = 'pointer';
         drawFileWaveform(ctx, w, h);
-    } else if (sound_mode === 'mic') {
+    } else if (sound_mode === 'mic' && analyser && dataArray) {
         waveCanvas.style.cursor = 'default';
         drawMicWaveform(ctx, w, h);
+        updatePlayPauseButton();
+    } else if (sound_mode === 'up' && mediaElement && !audioBuffer) {
+        waveCanvas.style.cursor = 'pointer';
+        drawMicWaveform(ctx, w, h);
+        const ct = mediaElement && isFinite(mediaElement.currentTime) ? mediaElement.currentTime : 0;
+        const dur = mediaElement && isFinite(mediaElement.duration) ? mediaElement.duration : 0;
+        updateTimer(ct, dur);
         updatePlayPauseButton();
     } else {
         const timerEl = document.getElementById('audioTimer');
@@ -388,21 +684,20 @@ function drawWaveform() {
 function drawFileWaveform(ctx, w, h) {
     if (!waveformData || !audioBuffer || !audioCtx) return;
     
-    let progress = 0, currentTime = playbackOffset, duration = audioBuffer.duration || 0;
-    
+    const duration = audioBuffer.duration || 0;
+    const computePosition = () => {
+        if (isPaused || playbackStartTime === null) return Math.max(0, Math.min(playbackOffset, duration));
+        const elapsed = (audioCtx ? audioCtx.currentTime : 0) - playbackStartTime;
+        return Math.max(0, Math.min(playbackOffset + elapsed, duration));
+    };
+    let currentTime;
+    let progress;
     if (dragProgress !== null) {
-        progress = dragProgress;
+        progress = Math.max(0, Math.min(dragProgress, 1));
         currentTime = progress * duration;
-    } else if (isPaused) {
-        currentTime = playbackOffset;
-        progress = duration > 0 ? Math.min(Math.max(playbackOffset / duration, 0), 1) : 0;
-    } else if (playbackStartTime !== null && audioCtx) {
-        const elapsed = audioCtx.currentTime - playbackStartTime;
-        currentTime = Math.min(Math.max(elapsed + playbackOffset, 0), duration);
-        progress = duration > 0 ? Math.min(Math.max(currentTime / duration, 0), 1) : 0;
     } else {
-        currentTime = playbackOffset;
-        progress = duration > 0 ? Math.min(Math.max(playbackOffset / duration, 0), 1) : 0;
+        currentTime = computePosition();
+        progress = duration > 0 ? Math.min(Math.max(currentTime / duration, 0), 1) : 0;
     }
     
     const progressX = w * progress, progressIndex = Math.floor(progress * waveformData.length);
@@ -442,10 +737,13 @@ function drawFileWaveform(ctx, w, h) {
 }
 
 function drawMicWaveform(ctx, w, h) {
-    analyser.getByteTimeDomainData(dataArray);
+    const tdAnalyser = leftAnalyser || analyser;
+    const tdArray = leftAnalyser ? dataArrayLeft : dataArray;
+    if (!tdAnalyser || !tdArray) return;
+    tdAnalyser.getByteTimeDomainData(tdArray);
     let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-    micWaveformHistory.push(sum / dataArray.length);
+    for (let i = 0; i < tdArray.length; i++) sum += tdArray[i];
+    micWaveformHistory.push(sum / tdArray.length);
     if (micWaveformHistory.length > MAX_MIC_HISTORY) micWaveformHistory.shift();
     if (micWaveformHistory.length === 0) return;
     
@@ -483,7 +781,7 @@ function setupWaveformDragHandlers() {
     const handleDragEnd = () => {
         if (isDragging) {
             isDragging = false;
-            if (dragProgress !== null && audioBuffer && audioCtx) {
+            if (dragProgress !== null && (audioBuffer || mediaElement) && audioCtx) {
                 const finalProgress = dragProgress;
                 dragProgress = null;
                 requestAnimationFrame(() => seekToPosition(finalProgress));
@@ -492,7 +790,7 @@ function setupWaveformDragHandlers() {
     };
     
     canvas.addEventListener('mousedown', (e) => {
-        if (sound_mode === 'up' && audioBuffer) {
+        if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
             isDragging = true;
             handleWaveformClick(e);
@@ -500,7 +798,7 @@ function setupWaveformDragHandlers() {
     });
     
     document.addEventListener('mousemove', (e) => {
-        if (isDragging && sound_mode === 'up' && audioBuffer) {
+        if (isDragging && sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
             handleWaveformClick(e);
         }
@@ -508,14 +806,14 @@ function setupWaveformDragHandlers() {
     
     document.addEventListener('mouseup', handleDragEnd);
     canvas.addEventListener('touchstart', (e) => {
-        if (sound_mode === 'up' && audioBuffer) {
+        if (sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
             isDragging = true;
             handleWaveformClick(e.touches[0]);
         }
     });
     document.addEventListener('touchmove', (e) => {
-        if (isDragging && sound_mode === 'up' && audioBuffer) {
+        if (isDragging && sound_mode === 'up' && (audioBuffer || mediaElement)) {
             e.preventDefault();
             if (e.touches.length > 0) handleWaveformClick(e.touches[0]);
         }
@@ -525,7 +823,7 @@ function setupWaveformDragHandlers() {
 }
 
 function handleWaveformClick(e) {
-    if (!audioBuffer || !waveCanvas) return;
+    if (!(audioBuffer || mediaElement) || !waveCanvas) return;
     const rect = waveCanvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const progress = Math.max(0, Math.min(1, (Math.max(0, Math.min(e.clientX - rect.left, rect.width)) / rect.width)));
@@ -538,48 +836,42 @@ function handleWaveformClick(e) {
     }
 }
 
-function drawFrequencyVisualizers() {
-    if (!analyser || !dataArray) {
-        if (freqLeftCtx && freqLeftCanvas) freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
-        if (freqRightCtx && freqRightCanvas) freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
-        return;
-    }
-    
-    analyser.getByteFrequencyData(dataArray);
-    const mid = Math.floor(dataArray.length / 2);
-    
-    // Calculate overall intensity for left and right channels
-    let leftSum = 0, rightSum = 0;
-    for (let i = 0; i < mid; i++) leftSum += dataArray[i];
-    for (let i = mid; i < dataArray.length; i++) rightSum += dataArray[i];
-    
-    const leftIntensity = Math.min(1, (leftSum / mid) / 255);
-    const rightIntensity = Math.min(1, (rightSum / (dataArray.length - mid)) / 255);
-    
-    if (freqLeftCtx && freqLeftCanvas) drawProgressBar(freqLeftCtx, freqLeftCanvas, leftIntensity);
-    if (freqRightCtx && freqRightCanvas) drawProgressBar(freqRightCtx, freqRightCanvas, rightIntensity);
-}
+// function drawFrequencyVisualizers() {
+//     if (leftAnalyser && rightAnalyser && dataArrayLeft && dataArrayRight) {
+//         leftAnalyser.getByteFrequencyData(dataArrayLeft);
+//         rightAnalyser.getByteFrequencyData(dataArrayRight);
+//         if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArrayLeft, 0, dataArrayLeft.length);
+//         if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArrayRight, 0, dataArrayRight.length);
+//         return;
+//     }
+//     if (analyser && dataArray) {
+//         analyser.getByteFrequencyData(dataArray);
+//         const mid = Math.floor(dataArray.length / 2);
+//         if (freqLeftCtx && freqLeftCanvas) drawFrequencyBars(freqLeftCtx, freqLeftCanvas, dataArray, 0, mid);
+//         if (freqRightCtx && freqRightCanvas) drawFrequencyBars(freqRightCtx, freqRightCanvas, dataArray, mid, dataArray.length);
+//         return;
+//     }
+//     if (freqLeftCtx && freqLeftCanvas) freqLeftCtx.clearRect(0, 0, freqLeftCanvas.width, freqLeftCanvas.height);
+//     if (freqRightCtx && freqRightCanvas) freqRightCtx.clearRect(0, 0, freqRightCanvas.width, freqRightCanvas.height);
+// }
 
-function drawProgressBar(ctx, canvas, intensity) {
+function drawFrequencyBars(ctx, canvas, arr, startIndex, endIndex) {
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
-    
-    // Draw background
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-    ctx.fillRect(0, 0, w, h);
-    
-    // Draw progress bar from bottom to top
-    const barHeight = intensity * h;
-    const y = h - barHeight;
-    
-    // Create gradient from blue (bottom) to red (top)
-    const gradient = ctx.createLinearGradient(0, h, 0, 0);
-    gradient.addColorStop(0, 'rgb(0, 100, 255)'); // Blue at bottom
-    gradient.addColorStop(1, 'rgb(255, 0, 0)'); // Red at top
-    
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, y, w, barHeight);
+    const count = Math.max(1, endIndex - startIndex);
+    const barWidth = w / count;
+    for (let i = startIndex, x = 0; i < endIndex; i++, x += barWidth) {
+        const v = arr[i] / 255;
+        const barHeight = v * h;
+        const y = h - barHeight;
+        const g = ctx.createLinearGradient(0, h, 0, 0);
+        g.addColorStop(0, 'rgb(0, 100, 255)');
+        g.addColorStop(1, 'rgb(255, 0, 0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, Math.max(1, barWidth - 0.5), barHeight);
+    }
 }
+
 
 function toggleMenu() {
     document.getElementById('controls').classList.toggle('collapsed');

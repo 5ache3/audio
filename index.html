@@ -10,7 +10,15 @@
         <button class="toggle-btn" onclick="toggleMenu()">☰</button>
         <div class="content">
             <h2>⚛️ NEBULA CORE</h2>
-            <input type="file" id="audioFile" accept="audio/*">
+            <label for="shapeSelect">Shape</label>
+            <select id="shapeSelect">
+                <option value="sphere">Spheres (Nebula)</option>
+                <option value="octahedron">Tetrahedron (Crystal)</option>
+                <option value="cylinder">Cylinder (Tube)</option>
+                <option value="torus">Torus (Ring)</option>
+                <option value="spiral">Spiral (Helix)</option>
+            </select>
+            <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,.oga,.flac,.aac,.m4a,.aiff,.aif,.caf,.webm,audio/*">
             <button id="uploadBtn">PLAY FILE</button>
             <button id="micBtn">USE MIC</button>
             <div class="info">
@@ -22,8 +30,8 @@
     </div>
     
     <div id="container">
-        <canvas id="freqLeft" class="freq-visualizer"></canvas>
-        <canvas id="freqRight" class="freq-visualizer"></canvas>
+        <!-- <canvas id="freqLeft" class="freq-visualizer"></canvas>
+        <canvas id="freqRight" class="freq-visualizer"></canvas> -->
         <div id="transcript">
             <canvas id="waveform"></canvas>
             <div id="audioControls">

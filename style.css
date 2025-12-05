@@ -54,7 +54,7 @@ input[type="file"] { width: 100%; margin: 10px 0; font-size: 12px; color: #aaa; 
 
 #transcript {
     position: absolute;
-    bottom: 20px;
+    bottom: 40px;
     left: 20px;
     right: 20px;
     width: auto;
@@ -119,18 +119,15 @@ input[type="file"] { width: 100%; margin: 10px 0; font-size: 12px; color: #aaa; 
 
 .freq-visualizer {
     position: fixed;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 20px;
-    height: 60vh;
+    top: 0;
+    width: 60px;
+    height: 100vh;
     z-index: 50;
     pointer-events: none;
-    border-radius: 10px;
-    overflow: hidden;
 }
 #freqLeft {
-    left: 100px;
+    left: 30px;
 }
 #freqRight {
-    right: 100px;
+    right: 30px;
 }
