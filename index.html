@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Nebula Particle Visualizer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="controls" class="collapsed">
+        <button class="toggle-btn" onclick="toggleMenu()">☰</button>
+        <div class="content">
+            <h2>⚛️ NEBULA CORE</h2>
+            <input type="file" id="audioFile" accept="audio/*">
+            <button id="uploadBtn">PLAY FILE</button>
+            <button id="micBtn">USE MIC</button>
+            <div class="info">
+                Visualizer active.<br>
+                High-Performance Bloom Enabled.<br>
+                10 Layers | 80k Particles
+            </div>
+        </div>
+    </div>
+    
+    <div id="container">
+        <canvas id="freqLeft" class="freq-visualizer"></canvas>
+        <canvas id="freqRight" class="freq-visualizer"></canvas>
+        <div id="transcript">
+            <canvas id="waveform"></canvas>
+            <div id="audioControls">
+                <button id="playPauseBtn">⏸</button>
+                <div id="audioTimer"></div>
+            </div>
+        </div>
+
+    </div>
+    <div class="fps" id="fpsCounter">FPS: 60</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script src="index.js" type="module"></script>
+</body>
+</html>
