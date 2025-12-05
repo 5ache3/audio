@@ -1,0 +1,23 @@
+{
+    "name": "audio-visualizer",
+    "version": "1.0.0",
+    "description": "Nebula Particle Audio Visualizer",
+    "main": "server.js",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node server.js"
+    },
+    "keywords": [
+        "audio",
+        "visualizer",
+        "three.js"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "express": "^4.18.2"
+    },
+    "engines": {
+        "node": ">=18.x"
+    }
+}
