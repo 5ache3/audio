@@ -1,0 +1,62 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #000;
+    color: #fff;
+    overflow: hidden;
+}
+
+#container { width: 100vw; height: 100vh; }
+
+/* UI Controls Styling */
+#controls {
+    position: absolute;
+    top: 20px; left: 20px;
+    background: rgba(0, 0, 0, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    z-index: 100;
+    backdrop-filter: blur(10px);
+    transition: width 0.3s, height 0.3s;
+    overflow: hidden;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.1);
+}
+
+#controls.collapsed { width: 50px; height: 50px; border-radius: 25px; }
+#controls:not(.collapsed) { width: 300px; height: auto; }
+
+.content { padding: 20px; opacity: 1; transition: opacity 0.3s 0.1s; }
+#controls.collapsed .content { opacity: 0; pointer-events: none; }
+
+.toggle-btn {
+    position: absolute; top: 0; left: 0;
+    width: 50px; height: 50px;
+    background: transparent; border: none;
+    color: #00d4ff; font-size: 24px;
+    cursor: pointer; z-index: 101;
+}
+.toggle-btn:hover { color: #fff; text-shadow: 0 0 10px #00d4ff; }
+
+h2 { font-size: 18px; margin-bottom: 15px; color: #00d4ff; letter-spacing: 1px; }
+
+label { display: block; margin-bottom: 5px; color: #aaa; font-size: 12px; }
+
+button {
+    width: 100%; padding: 10px; margin: 5px 0;
+    background: linear-gradient(45deg, #00d4ff, #0055ff);
+    border: none; border-radius: 6px;
+    color: #fff; font-weight: bold; cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.2s;
+}
+button:hover { transform: translateY(-1px); box-shadow: 0 4px 15px rgba(0, 85, 255, 0.4); }
+button:active { transform: translateY(1px); }
+
+input[type="file"], select { 
+    width: 100%; padding: 8px; margin: 10px 0; 
+    font-size: 14px; color: #fff; background: #222; 
+    border: 1px solid #00d4ff44; border-radius: 4px;
+}
+
+.info { font-size: 11px; margin-top: 15px; color: #666; line-height: 1.4; border-top: 1px solid #333; padding-top: 10px; }
+.fps { position: absolute; bottom: 10px; left: 10px; color: #444; font-size: 10px; font-family: monospace; pointer-events: none; }
